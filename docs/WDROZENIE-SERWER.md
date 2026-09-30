@@ -66,15 +66,43 @@ domowy. Pliki wgrane po `cwd` lądują tam, gdzie ich nie widać z shella, a `ST
 zglasza sukces.
 
 Poprawnie: `STOR` w korzeniu FTP (= `/home/srv120794`), potem przeniesienie
-skryptem, który ustawia też uprawnienia.
+skryptem, który ustawia też uprawnienia:
 
-```python
-# upload: bez cwd
-ftp.storbinary("STOR bot.py", fh)
-
-# potem na serwerze
-python3.11 /home/srv120794/setup_app.py     # przenosi i ustawia 0600
+```bash
+python3.11 /home/srv120794/ai-dan/setup_app.py     # przenosi i ustawia 0600
 ```
+
+### Dlaczego to nie jest tylko „niewidoczny plik”
+
+Pierwsza wersja uploadera robiła właśnie `cwd` i przez to podczas wdrożenia
+zostały **dwie kopie pliku sesji**:
+
+```
+0o644  19838 B  /home/srv120794/home/srv120794/storage_state.json
+```
+
+`0644` znaczy **czytelny dla każdego, kto ma shell na tym koncie** — a to pełna
+sesja Google, wystarczająca do zalogowania się na Twoje konto. FTP nadaje `0644`
+i nie ma `chmod` w whitelistcie shella, więc uprawnienia trzeba ustawiać skryptem.
+
+Wniosek: przy wgrywaniu czegokolwiek wrażliwego **sprawdź uprawnienia po
+wgraniu**, nie tylko to, że `STOR` zwrócił sukces. Skrypt
+`tools/setup_app.py` w repo robi to właśnie.
+
+## Stan wdrożenia
+
+Zweryfikowane 2026-09-30: bot odpowiada na `/test` i `/ai-dan` na serwerze
+(potwierdzenie właściciela, nie tylko logi).
+
+```
+11:44:29  ai-dan online jako Ai-Dan#8817 (ID: 1484613933737312278)
+11:44:29  NotebookLM: klient gotowy (keepalive=600.0s, chat_timeout=300.0s)
+11:54:30  POST https://accounts.google.com/RotateCookies  200
+12:04:30  POST https://accounts.google.com/RotateCookies  200
+```
+
+Ostatnie dwie linie to ten sam mechanizm co 10 minut — sesja sama się podbija
+bez udziału człowieka.
 
 ## Odnowienie sesji (jedyna czynność ręczna)
 
