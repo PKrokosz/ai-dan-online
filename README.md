@@ -76,10 +76,24 @@ a mimo to leżała w repo i nie dawała się uruchomić.
 | Plik | Co w nim |
 |---|---|
 | [`docs/ARCHITEKTURA.md`](docs/ARCHITEKTURA.md) | Przepływ, kontrakt z NotebookLM, granice testowalności |
+| [`docs/WDROZENIE-SERWER.md`](docs/WDROZENIE-SERWER.md) | Wdrożenie na srv120794, sterowanie, odnowienie sesji, pułapka FTP |
 | [`docs/OPERACJE.md`](docs/OPERACJE.md) | Start/stop, logi, deploy, co robić gdy bot nie odpowiada |
 | [`docs/NOTEBOOKLM.md`](docs/NOTEBOOKLM.md) | Logowanie, potwierdzone pułapki biblioteki i środowiska |
 | [`docs/ZNANE-PROBLEMY.md`](docs/ZNANE-PROBLEMY.md) | Otwarte ograniczenia, z którymi bot żyje |
 | [`docs/HISTORIA.md`](docs/HISTORIA.md) | Co było nie tak w wersji v1 i jak to wyszło na jaw |
+
+## Na serwerze
+
+Bot działa na `srv120794` i nie wymaga Twojego komputera:
+
+```bash
+python3.11 /home/srv120794/ai-dan/daemon.py start|stop|status|log
+```
+
+Jedyny moment, w którym komputer jest potrzebny, to odnowienie sesji Google
+— raz na kilka tygodni. Gdy wygadnie, bot **sam o tym napisze na Discordzie**
+(jedno powiadomienie, nie spam), więc nie trzeba zgadywać, czy coś się zepsuło.
+Instrukcja odnowienia: [`docs/WDROZENIE-SERWER.md`](docs/WDROZENIE-SERWER.md).
 
 ## Bezpieczeństwo
 

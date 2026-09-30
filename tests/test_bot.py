@@ -79,6 +79,34 @@ class AtrapaZlyKlient:
         self.chat = AtrapaZlyChat()
 
 
+class AtrapaUzytkownik:
+    def __init__(self, ident, bot):
+        self.id = ident
+        self._bot = bot
+
+    async def send(self, tresc):
+        if self.id in self._bot.zablokuj:
+            raise RuntimeError("Cannot send messages to this user")
+        self._bot.wyslane.append((self.id, tresc))
+
+
+class AtrapaDiscord:
+    """Zbiera powiadomienia. fetch_user/get_user zwracaja atrape uzytkownika."""
+
+    def __init__(self):
+        self.wyslane = []
+        self.komunikaty = []
+        self.zablokuj = set()
+
+    async def fetch_user(self, ident):
+        self.komunikaty.append(("fetch", ident))
+        return AtrapaUzytkownik(int(ident), self)
+
+    def get_user(self, ident):
+        self.komunikaty.append(("get", ident))
+        return AtrapaUzytkownik(int(ident), self)
+
+
 class TestKontraktChat(unittest.IsolatedAsyncioTestCase):
     async def test_uzywa_chat_ask(self):
         """PODSTAWOWY: bot musi wolac chat.ask, nie chat()."""
@@ -200,6 +228,93 @@ class TestBledy(unittest.TestCase):
         # a nie "RuntimeError: boom". Luka znaleziona przez test negatywny:
         # wersja z type(exc).__name__ przechodzila ten test.
         self.assertNotIn("RuntimeError", tekst)
+
+
+class TestPowiadomienieSesji(unittest.IsolatedAsyncioTestCase):
+    """Jednorazowe powiadomienie o wygaslej sesji.
+
+    Wymaganie: powiadomienie RAZ na incydent, kanał zapasowy gdy DM zamknięty,
+    brak wyjątku przy awarii wysyłki, reset po powrocie do zdrowia.
+    """
+
+    def setUp(self):
+        from notebooklm import AuthError, NetworkError, RateLimitError
+
+        self.AuthError = AuthError
+        self.NetworkError = NetworkError
+        self.RateLimitError = RateLimitError
+        bot._powiadomiono_o_sesji = False
+        self.bot = AtrapaDiscord()
+        self.bledy = [111]
+
+    def tearDown(self):
+        bot._powiadomiono_o_sesji = False
+
+    async def test_auth_error_jest_bladem_sesji(self):
+        self.assertTrue(bot.czy_blad_sesji(self.AuthError("expired")))
+
+    async def test_poznane_sygnaly_biblioteki_jest_bladem_sesji(self):
+        for tekst in [
+            "Authentication expired or invalid.",
+            "Redirected to accounts.google.com",
+            "Run 'notebooklm login' to re-authenticate.",
+        ]:
+            with self.subTest(tekst=tekst):
+                self.assertTrue(bot.czy_blad_sesji(ValueError(tekst)))
+
+    async def test_inne_bledy_nie_sa_bladem_sesji(self):
+        for exc in [
+            self.RateLimitError("429"),
+            self.NetworkError("timeout"),
+            ValueError("pusty notebook"),
+        ]:
+            with self.subTest(exc=type(exc).__name__):
+                self.assertFalse(bot.czy_blad_sesji(exc))
+
+    async def test_powiadomienie_idzie_do_wlasciciela(self):
+        bot.OWNER_USER_ID = "222"
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        self.assertTrue(ok)
+        self.assertEqual([id for id, _ in self.bot.wyslane], [222])
+        self.assertTrue(self.bot.wyslane[0][1])
+
+    async def test_dm_wlasciciela_zamkniety_spada_na_zglaszajacego(self):
+        bot.OWNER_USER_ID = "222"
+        self.bot.zablokuj.add(222)
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        self.assertTrue(ok)
+        self.assertEqual([id for id, _ in self.bot.wyslane], [111])
+
+    async def test_drugie_powiadomienie_w_tej_samej_incydencie_nie_wychodzi(self):
+        bot.OWNER_USER_ID = "222"
+        await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        self.assertEqual(len(self.bot.wyslane), 1)
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        self.assertFalse(ok)
+        self.assertEqual(len(self.bot.wyslane), 1)
+
+    async def test_po_powrocie_do_zdrowia_powiadomienie_znowu_dziala(self):
+        bot.OWNER_USER_ID = "222"
+        await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        bot._powiadomiono_o_sesji = False  # reset w handlerze po sukcesie
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        self.assertTrue(ok)
+        self.assertEqual(len(self.bot.wyslane), 2)
+
+    async def test_komunikat_wymaga_dzialania_czlowieka(self):
+        bot.OWNER_USER_ID = ""
+        await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        tresc = self.bot.wyslane[0][1]
+        self.assertIn("notebooklm login", tresc)
+        self.assertIn("storage_state.json", tresc)
+        self.assertLessEqual(len(tresc), 2000)
+
+    async def test_awaria_wysylki_nie_wywraca_bota(self):
+        bot.OWNER_USER_ID = "222"
+        self.bot.zablokuj.update({222, 111})
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        self.assertFalse(ok)
+        self.assertEqual(self.bot.wyslane, [])
 
 
 class TestPodzialPytania(unittest.TestCase):

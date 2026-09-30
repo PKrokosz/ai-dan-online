@@ -47,6 +47,8 @@ from notebooklm import (
 
 NOTEBOOK_ID = os.getenv("NOTEBOOK_ID", "").strip()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+# Kto dostaje powiadomienie o wygasłej sesji. Pusto = osoba, która zada pytanie.
+OWNER_USER_ID = os.getenv("OWNER_USER_ID", "").strip()
 KEEPALIVE = float(os.getenv("KEEPALIVE_INTERVAL", "600"))
 CHAT_TIMEOUT = float(os.getenv("CHAT_TIMEOUT", "300"))
 
@@ -172,6 +174,79 @@ def podziel_pytanie(pytanie: str) -> tuple[str, bool]:
     return q, False
 
 
+# --- Jednorazowe powiadomienie o wygasłej sesji --------------------------
+#
+# Sygnały są przepisane z biblioteki (`_auth/refresh.py`, `_AUTH_ERROR_SIGNALS`),
+# żeby wykrywać dokładnie te sytuacje, dla których ona sama odpala hook
+# odświeżania. Własna lista mogłaby się z biblioteką rozjechać.
+SYGNAŁY_WYGASŁEJ_SESJI = (
+    "authentication expired",
+    "redirected to",
+    "run 'notebooklm login'",
+)
+
+# Jeden bool na cały proces: powiadomienie leci RAZ na incydent, a nie przy
+# każdym pytaniu. Zadna pętla, żadne zadanie w tle — koszt to jeden bit.
+_powiadomiono_o_sesji = False
+
+
+def czy_blad_sesji(exc: BaseException) -> bool:
+    """True, gdy błąd oznacza wygasłą sesję Google (nie np. limit zapytań)."""
+    if isinstance(exc, AuthError):
+        return True
+    tekst = str(exc).lower()
+    return any(s in tekst for s in SYGNAŁY_WYGASŁEJ_SESJI)
+
+
+async def powiadom_o_wygaslej_sesji(
+    bot: Any, bledy: list[int], id_zglaszajacego: int
+) -> bool:
+    """Wysyła pojedyncze powiadomienie o wygasłej sesji. Zwraca True, jeśli wyszło.
+
+    Kolejność kanałów: najpierw właściciel (`OWNER_USER_ID`), potem osoba, która
+    zadała pytanie. DM może być zamknięty, a wtedy bez drugiego kanału
+    powiadomienie zniknęłoby bez śladu.
+    """
+    global _powiadomiono_o_sesji
+    if _powiadomiono_o_sesji:
+        return False
+    _powiadomiono_o_sesji = True
+
+    tekst = (
+        "🔑 **Sesja NotebookLM wygasła** — bot nie odpowiada na pytania.\n\n"
+        "Poprawka (jednorazowa, kilka minut):\n"
+        "1. Na komputerze: `notebooklm login --browser chrome`\n"
+        "2. Wgrać `storage_state.json` na serwer:\n"
+        "   `/home/srv120794/ai-dan/nlm-home/storage_state.json`\n"
+        "3. `python3.11 /home/srv120794/ai-dan/daemon.py stop && … start`\n\n"
+        "Nie da się tego zrobić automatycznie — biblioteka nie umie zalogować się "
+        "bez przeglądarki, a `rookiepy` (import ciasteczek) wymaga Rust, którego "
+        "blokuje polityka Windows. Powiadomienie leci raz na incydent."
+    )
+
+    wysłane = False
+    for id_docelowy in [int(OWNER_USER_ID)] if OWNER_USER_ID else []:
+        if id_docelowy == id_zglaszajacego:
+            continue
+        try:
+            uzytkownik = await bot.fetch_user(id_docelowy)
+            await uzytkownik.send(tekst)
+            log.warning("Powiadomiono wlasciciela %s o wygaslej sesji", id_docelowy)
+            wysłane = True
+        except Exception as exc:  # noqa: BLE001 — DM moze byc zamkniety
+            log.warning("Nie udalo sie powiadomic wlasciciela %s: %s", id_docelowy, exc)
+
+    if not wysłane:
+        try:
+            await bot.get_user(id_zglaszajacego).send(tekst)
+            log.warning("Powiadomiono uzytkownika %s o wygaslej sesji", id_zglaszajacego)
+            wysłane = True
+        except Exception as exc:  # noqa: BLE001
+            log.error("Nie udalo sie powiadomic uzytkownika %s: %s", id_zglaszajacego, exc)
+
+    return wysłane
+
+
 # ---------------------------------------------------------------------------
 # Klient Discord
 # ---------------------------------------------------------------------------
@@ -283,7 +358,12 @@ async def ai_dan(interaction: discord.Interaction, pytanie: str) -> None:
     except Exception as exc:
         log.warning("Zapytanie nieudane (user=%s): %s", uid, exc)
         await interaction.followup.send(komunikat_bledu(exc), ephemeral=True)
+        if czy_blad_sesji(exc):
+            await powiadom_o_wygaslej_sesji(interaction.client, bledy, uid)
         return
+
+    global _powiadomiono_o_sesji
+    _powiadomiono_o_sesji = False
 
     if nowy_cid:
         if len(rozmowy) >= MAX_PODRZEDKOW and uid not in rozmowy:

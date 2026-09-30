@@ -75,3 +75,19 @@ Pomylenie ich przy weryfikacji daje wyniki z niewłaściwego źródła.
 
 Bot nie używa głosu, ale `discord.py` ostrzega przy starcie. Opcjonalne
 zależności są opisane w `requirements.txt` — instalacja ich wycisza log.
+
+## 9. Nie ma watchdoga
+
+Bot odpalony przez `daemon.py` działa, dopóki serwer nie zrestartuje się albo
+proces nie padnie. **Po restarcie hostingu trzeba `daemon.py start`.**
+
+Pętla nadzorcy w Pythonie (fork → czekaj na wyjście → restart po 10 s)
+zastąpiłaby to kilkunastoma linijkami i działałaby bez `cron` i bez `systemd`,
+których na CloudLinux nie ma. Świadomie jej nie ma — dodana na żądanie,
+gdy będzie potrzebna.
+
+## 10. `OWNER_USER_ID` pusty domyślnie
+
+Powiadomienie o wygasłej sesji idzie do osoby, która zadała pytanie i dostała
+błąd. Bez `OWNER_USER_ID` nikt nie dostanie powiadomienia, jeśli nikt akurat nie
+zapyta. Wystarczy wpisać ID właściciela w `.env`, żeby dostać DM zawsze.

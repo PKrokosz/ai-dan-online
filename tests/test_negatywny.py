@@ -106,6 +106,24 @@ ZLAMANIA = [
         b"            powtorzony = False",
         "test_tytul_juz_w_tresci_nie_powtarzany",
     ),
+    (
+        "regresja: powiadomienie o sesji leci przy kazdym pytaniu (spam)",
+        b"    if _powiadomiono_o_sesji:\n        return False",
+        b"    if False:\n        return False",
+        "test_drugie_powiadomienie_w_tej_samej_incydencie_nie_wychodzi",
+    ),
+    (
+        "regresja: zamkniety DM wlasciciela nie ma kanalu zapasowego",
+        b"    if not wys",
+        b"    if False:  # kanal zapasowy usuniety\n        if False:",
+        "test_dm_wlasciciela_zamkniety_spada_na_zglaszajacego",
+    ),
+    (
+        "regresja: awaria wysylki powiadomienia wywraca bota",
+        b"        except Exception as exc:  # noqa: BLE001\n            log.error(\"Nie udalo sie powiadomic uzytkownika",
+        b"        except Exception as exc:  # noqa: BLE001\n            raise exc\n        finally:\n            _ = \"Nie udalo sie powiadomic uzytkownika",
+        "test_awaria_wysylki_nie_wywraca_bota",
+    ),
 ]
 
 print("=== stan przed zlamaniami ===")
