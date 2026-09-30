@@ -101,7 +101,37 @@ class TestTrwalosc(PodmienKatalog, unittest.TestCase):
         import sys as _sys
         if _sys.platform == "win32":
             self.skipTest("Windows: st_mode nie odzwierciedla chmod")
+        # plik tworzymy TU — wczesniej test zakladal, ze zostal go jakis
+        # poprzedni, i na serwerze konczyl sie FileNotFoundError zamiast
+        # sprawdzeniem uprawnien
+        kolejka.dodaj("audio", channel_id=1, author_id=2)
+        self.assertTrue(kolejka.PLIK.exists())
         self.assertEqual(kolejka.PLIK.stat().st_mode & 0o777, 0o600)
+
+    def test_dwa_zadania_w_tej_samej_milisekundzie_maja_rozne_id(self):
+        # Regresja 30.09: id bylo z milisekund, wiec petla dodajaca 5 zadan
+        # dostawala ten sam klucz i zadania nadpisywal sie nawzajem. Kolejka
+        # nigdy nie byla pelna, a LIMIT_UROJONYCH nie chroniczyl przed zalewem.
+        #
+        # Milisekunde WYMUSZAMY: bez tego zalezy to od szybkosci dysku i na
+        # Windows przechodzi nawet z bugiem — bramka, ktora nie lapie regresji
+        # na maszynie deweloperskiej, jest bramka udajaca.
+        from unittest.mock import patch
+        with patch.object(kolejka.time, "time", return_value=1759000000.123):
+            ids = {kolejka.dodaj("audio", channel_id=1, author_id=2)["id"]
+                   for _ in range(5)}
+        self.assertEqual(len(ids), 5)
+
+    def test_kolejka_pelna_liczy_wszystkie_zadania_nie_ostatnie(self):
+        # ta sama wymuszona milisekunda — inaczej na wolnym dysku limit
+        # nigdy nie zostalby osiagniety i test niczego by nie sprawdzal
+        from unittest.mock import patch
+        with patch.object(kolejka.time, "time", return_value=1759000000.123):
+            for _ in range(kolejka.LIMIT_UROJONYCH):
+                kolejka.dodaj("audio", channel_id=1, author_id=2)
+            self.assertEqual(len(kolejka.aktywne()), kolejka.LIMIT_UROJONYCH)
+            with self.assertRaises(ValueError):
+                kolejka.dodaj("video", channel_id=1, author_id=2)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +68,12 @@ def dodaj(typ: str, *, channel_id: int, author_id: int,
     if len(czekajace) >= LIMIT_UROJONYCH:
         raise ValueError(
             f"kolejka pelna ({LIMIT_UROJONYCH} zadan w toku) — sprobuj za chwile")
-    zadanie_id = f"z{int(time.time() * 1000)}"
+    # Milisekundy NIE wystarczaja jako id. Dwa `/audio` klikniete w tej samej
+    # milisekundzie (albo petla testowa) dostaly ten sam `z...` i nadpisaly sie
+    # nawzajem — zlecenie znikalo po cichu, a kolejka nigdy nie byla pelna, wiec
+    # LIMIT_UROJONYCH nie chroniczyl przed zalewem. Sufiks uuid unikalizuje;
+    # prefiks milisekundowy zostaje, bo `nastepne()` sortuje po nim.
+    zadanie_id = f"z{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
     wpis = {
         "id": zadanie_id,
         "typ": typ,
@@ -89,7 +95,11 @@ def nastepne() -> dict[str, Any] | None:
     czekajace = [z for z in stan["zadania"].values() if z["stan"] == "czekajace"]
     if not czekajace:
         return None
-    return min(czekajace, key=lambda z: z["utworzono"])
+    # `utworzono` ma precyzje do sekundy, wiec dwa zadania dodane w tej samej
+    # sekundzie dalyby remisy i kolejność zalezala od przypadku. Drugim kluczem
+    # jest id, ktorego prefiks to milisekundy — remis rozstrzyga czas, nie
+    # kolejność w slowniku.
+    return min(czekajace, key=lambda z: (z["utworzono"], z["id"]))
 
 
 def oznacz(zadanie_id: str, nowy_stan: str, wynik: Any = None) -> dict[str, Any] | None:
