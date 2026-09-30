@@ -238,7 +238,14 @@ async def powiadom_o_wygaslej_sesji(
 
     if not wysłane:
         try:
-            await bot.get_user(id_zglaszajacego).send(tekst)
+            # `fetch_user`, nie `get_user`: `get_user` czyta wylacznie cache
+            # i zwraca None dla kazdego, kto nie jest w pamieci. Bot jest
+            # slash-only i nie ma message_content, wiec cache jest pusty —
+            # na `get_user` powiadomienie nigdy nie wyszlo.
+            uzytkownik = await bot.fetch_user(id_zglaszajacego)
+            if uzytkownik is None:
+                raise RuntimeError("fetch_user zwrocil None")
+            await uzytkownik.send(tekst)
             log.warning("Powiadomiono uzytkownika %s o wygaslej sesji", id_zglaszajacego)
             wysłane = True
         except Exception as exc:  # noqa: BLE001

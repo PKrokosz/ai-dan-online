@@ -139,6 +139,12 @@ ZLAMANIA = [
         "test_dm_wlasciciela_zamkniety_spada_na_zglaszajacego",
     ),
     (
+        "regresja: powiadomienie o sesji z cache zamiast z API",
+        b"            uzytkownik = await bot.fetch_user(id_zglaszajacego)",
+        b"            uzytkownik = bot.get_user(id_zglaszajacego)",
+        "test_powiadomienie_dziala_gdy_uzytkownik_nie_ma_w_cache",
+    ),
+    (
         "regresja: wygasla sesja kierowana do restartu uslugi",
         b"    if _blad_polaczenia is not None and czy_blad_sesji(_blad_polaczenia):",
         b"    if _blad_polaczenia is not None and False:",

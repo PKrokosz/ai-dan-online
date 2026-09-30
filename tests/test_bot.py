@@ -311,6 +311,43 @@ class TestPowiadomienieSesji(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         bot._powiadomiono_o_sesji = False
 
+    async def test_powiadomienie_dziala_gdy_uzytkownik_nie_ma_w_cache(self):
+        """Pusty cache to stan normalny tego bota, nie wyjatek.
+
+        Bot jest slash-only i bez message_content, wiec `get_user` zwraca
+        None dla kazdego uzytkownika. Na produkcji powiadomienie o wygaslej
+        sesji wlasnie tak zginelo — `get_user(...).send` na None.
+        """
+
+        class BotCachePusty:
+            def __init__(self):
+                self.wyslane = []
+
+            async def fetch_user(self, uid):
+                bot_outer = self
+
+                class U:
+                    async def send(self, tekst):
+                        bot_outer.wyslane.append(tekst)
+
+                return U()
+
+            def get_user(self, uid):
+                return None  # cache pusta — jak w produkcji
+
+        atrapa = BotCachePusty()
+        # Wymuszamy brak wlasciciela: inaczej pierwsza galea (owner) odpowiada
+        # sama i test przechodzi bez dotkniecia sciezki awaryjnej — zielony,
+        # ktory niczego nie sprawdza.
+        wlasciciel = bot.OWNER_USER_ID
+        bot.OWNER_USER_ID = ""
+        try:
+            ok = await bot.powiadom_o_wygaslej_sesji(atrapa, [], 42)
+        finally:
+            bot.OWNER_USER_ID = wlasciciel
+        self.assertTrue(ok, "powiadomienie nie wyszlo mimo dostepnego fetch_user")
+        self.assertEqual(len(atrapa.wyslane), 1)
+
     async def test_auth_error_jest_bladem_sesji(self):
         self.assertTrue(bot.czy_blad_sesji(self.AuthError("expired")))
 
