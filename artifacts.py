@@ -30,6 +30,23 @@ LISTY: dict[str, str] = {
 # Nazwy biblioteki -> nazwy uzytkownika (odwrotnie do LISTY)
 TYPO_BIBLIOTEKI = {v.replace("list_", "", 1): k for k, v in LISTY.items()}
 
+# Rozszerzenie pliku wynikowego. Bez tego zalacznik dostawal nazwe `.mp3`
+# niezaleznie od zawartosci, wiec infografika (PNG) szla jako `xxxx.mp3`.
+# Nazwa pliku steruje tym, jak Discord pokazuje odtwarzanie i MIME przy
+# podgladzie — `ready to listen` dziala tylko dla wlasciwego typu.
+ROZSZERZENIA: dict[str, str] = {
+    "audio": "mp3",
+    "video": "mp4",
+    "infografika": "png",
+    "slajdy": "pdf",
+    "raport": "md",
+    "quiz": "json",
+    "fiszki": "json",
+    "tabela": "csv",
+    "mapa": "json",
+}
+DOMYSLNE_ROZSZERZENIE = "bin"
+
 STAN = {0: "?", 1: "OCZEKUJE", 2: "W TOKU", 3: "GOTOWY",
         4: "NIEUDANE", 5: "USUNIĘTY"}
 
@@ -39,6 +56,15 @@ LIMIT_PLIKU_B = 500 * 1024 * 1024           # sensowny sufit na sciezce tymczaso
 
 def identyfikator(a: Any) -> str:
     return str(getattr(a, "artifact_id", None) or getattr(a, "id", "") or "")
+
+
+def rozszerzenie(typ: str) -> str:
+    """Rozszerzenie pliku dla typu widzianego przez uzytkownika.
+
+    Nieznany typ daje `bin` zamiast `mp3` — lepiej neutralna nazwa niz
+    mylace rozszerzenie, pod ktorym nie ma takiej zawartosci.
+    """
+    return ROZSZERZENIA.get(str(typ).strip().lower(), DOMYSLNE_ROZSZERZENIE)
 
 
 def url_pliku(a: Any) -> str | None:

@@ -99,5 +99,48 @@ class TestNazwyTypow(unittest.TestCase):
         self.assertEqual(len(artifacts.LISTY), len(set(artifacts.LISTY.values())))
 
 
+class TestRozszerzenia(unittest.TestCase):
+    """Nazwa pliku steruje tym, jak Discord pokazuje plik w czacie.
+
+    Regresja 30.09: nazwa byla f"{id}.mp3" dla kazdego typu, wiec infografika
+    (PNG) wychodzila jako `.mp3` — bez odtwarzacza i z mylnym MIME.
+    """
+
+    def test_kazdy_typ_z_listy_ma_rozszerzenie(self):
+        for typ in artifacts.LISTY:
+            with self.subTest(typ=typ):
+                self.assertIn(artifacts.rozszerzenie(typ),
+                              artifacts.ROZSZERZENIA.values())
+
+    def test_odtwarzacze_dostaja_swoje_rozszerzenia(self):
+        self.assertEqual(artifacts.rozszerzenie("audio"), "mp3")
+        self.assertEqual(artifacts.rozszerzenie("video"), "mp4")
+        self.assertEqual(artifacts.rozszerzenie("infografika"), "png")
+
+    def test_nieznany_typ_to_bin_a_nie_mp3(self):
+        # lepsza neutralna nazwa niz mylace rozszerzenie, pod ktorym
+        # takiej zawartosci nie ma
+        self.assertEqual(artifacts.rozszerzenie("cos-obcego"), "bin")
+        self.assertNotEqual(artifacts.rozszerzenie("cos-obcego"), "mp3")
+
+    def test_typ_niewrazliwy_na_wielkosc_znakow_i_spacje(self):
+        self.assertEqual(artifacts.rozszerzenie("  AUDIO "), "mp3")
+
+    def test_rozszerzenie_nie_ma_kropli(self):
+        for typ, ext in artifacts.ROZSZERZENIA.items():
+            with self.subTest(typ=typ):
+                self.assertFalse(ext.startswith("."))
+                self.assertEqual(ext, ext.strip())
+
+    def test_bot_nie_hardkoduje_rozszerzenia(self):
+        sciezka = Path(artifacts.__file__).resolve().parent / "bot.py"
+        tekst = sciezka.read_text(encoding="utf-8")
+        poczatek = tekst.index("async def pobierz_i_wyslij")
+        koniec = tekst.index("\nasync def ", poczatek + 1)
+        cialo = tekst[poczatek:koniec]
+        self.assertNotIn(".mp3", cialo)
+        self.assertIn("artifacts.rozszerzenie(", cialo)
+
+
 if __name__ == "__main__":
     unittest.main()

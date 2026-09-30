@@ -476,9 +476,11 @@ async def pobierz_i_wyslij(klient: Any, wpis: dict[str, Any],
     """
     import hashlib
 
+    import artifacts
+
     katalog = Path(tempfile.gettempdir()) / "ai-dan-art"
     katalog.mkdir(parents=True, exist_ok=True)
-    nazwa = f"{wpis['id'][:8]}.mp3"
+    nazwa = f"{wpis['id'][:8]}.{artifacts.rozszerzenie(wpis.get('typ', ''))}"
     sciezka = katalog / nazwa
     try:
         dane = await pobierz_bajty(klient, wpis["url"])

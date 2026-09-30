@@ -264,18 +264,43 @@ ZLAMANIA_LIMITS = [
     ),
     ]
 
+def odzyskaj_po_przerwaniu() -> None:
+    """Przywraca pliki, jesli poprzedni przebieg zostal ubity.
+
+    `finally` w petli zlaman chroni tylko wyjatki wewnatrz procesu. SIGKILL —
+    timeout CI, Ctrl+C na konsoli hosta, `taskkill` — go nie uruchamia, wiec repo
+    zostaje z posadzona regresja i kolejny zestaw testow analizuje uszkodzony
+    plik zamiast wskazac, co zlamano. Zaobserwowane 30.09: przerwany przebieg
+    zostawil `bot.py` bez `asyncio.wait_for`, a `test_bot` wisial 60 s bez
+    zadnego komunikatu.
+
+    Backup `*.nagatyw` powstaje tuz przed pierwszym zlamaniem, wiec jego
+    obecnosc oznacza "poprzedni bieg nie dotarl do konca" — i ze w nim, nie w
+    biezacym pliku, lezy stan sprzed zlamania.
+    """
+    for kopia, zrodlo in ((KOPIA, BOT), (KOPIA_LIMITS, LIMITS)):
+        if not kopia.exists():
+            continue
+        stan = kopia.read_bytes()
+        zrodlo.write_bytes(stan)
+        kopia.unlink()
+        print(f"ODZYSKANO {zrodlo.name} z {kopia.name} (sha={sha(stan)}) — "
+              f"poprzedni przebieg zostal przerwany", flush=True)
+
+
+odzyskaj_po_przerwaniu()
 print("=== stan przed zlamaniami ===")
 przed = BOT.read_bytes()
 kod, wyjscie = uruchom_testy()
 print("  kod:", kod, "| werdykt:", verdict(wyjscie), "| bot.py:", sha(przed))
 stan_dobry = kod == 0
 KOPIA.write_bytes(przed)
-
 wyniki = []
-for opis, znajdz, podmien, oczekiwany_test in ZLAMANIA:
+for nr, (opis, znajdz, podmien, oczekiwany_test) in enumerate(ZLAMANIA, 1):
     if znajdz not in przed:
         wyniki.append({"zlamanie": opis, "wlozono": False, "bramkaPadla": False,
                        "uwaga": "NIE ZNALEZIONO tekstu — zlamanie nie zostalo sprawdzone"})
+        print(f"  [{nr}/{len(ZLAMANIA)}] POMINIETO — {opis}", flush=True)
         continue
     try:
         BOT.write_bytes(przed.replace(znajdz, podmien, 1))
@@ -284,6 +309,8 @@ for opis, znajdz, podmien, oczekiwany_test in ZLAMANIA:
             "zlamanie": opis, "wlozono": True, "bramkaPadla": kod != 0,
             "wskazanyTestPadl": oczekiwany_test in wyjscie, "oczekiwany": oczekiwany_test,
         })
+        print(f"  [{nr}/{len(ZLAMANIA)}] {'PADLO' if kod else 'NIE PADLO'}: {opis}",
+              flush=True)
     finally:
         BOT.write_bytes(przed)
 
@@ -302,10 +329,11 @@ stan_dobry_lim = kod_lim == 0
 KOPIA_LIMITS.write_bytes(przed_lim)
 
 wyniki_lim = []
-for opis, znajdz, podmien, oczekiwany_test in ZLAMANIA_LIMITS:
+for nr, (opis, znajdz, podmien, oczekiwany_test) in enumerate(ZLAMANIA_LIMITS, 1):
     if znajdz not in przed_lim:
         wyniki_lim.append({"zlamanie": opis, "wlozono": False, "bramkaPadla": False,
                            "uwaga": "NIE ZNALEZIONO tekstu — zlamanie nie zostalo sprawdzone"})
+        print(f"  [{nr}/{len(ZLAMANIA_LIMITS)}] POMINIETO — {opis}", flush=True)
         continue
     try:
         LIMITS.write_bytes(przed_lim.replace(znajdz, podmien, 1))
@@ -314,6 +342,8 @@ for opis, znajdz, podmien, oczekiwany_test in ZLAMANIA_LIMITS:
             "zlamanie": opis, "wlozono": True, "bramkaPadla": kod != 0,
             "wskazanyTestPadl": oczekiwany_test in wyjscie, "oczekiwany": oczekiwany_test,
         })
+        print(f"  [{nr}/{len(ZLAMANIA_LIMITS)}] "
+              f"{'PADLO' if kod else 'NIE PADLO'}: {opis}", flush=True)
     finally:
         LIMITS.write_bytes(przed_lim)
 
