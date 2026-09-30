@@ -261,6 +261,41 @@ class TestTestowePobranieSesji(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hasattr(klient.sources, "list"))
 
 
+class TestTerminZapytania(unittest.IsolatedAsyncioTestCase):
+    """Wiszący await musi zostać przerwany.
+
+    W produkcji `ask()` nigdy nie wróciło: NotebookLM odpowiedziało 200 na
+    `GenerateFreeFormStreamed`, po czym strumień został otwarty. `chat_timeout`
+    biblioteki to limit pojedynczego odczytu HTTP, nie czasu trwania — strumień
+    wysyłający kolejne bajty nigdy go nie przekroczy. Wiszący await nie jest
+    wyjątkiem, więc `except` niczego nie złapał i na Discordzie wisiało
+    "myśli..." w nieskożoność.
+    """
+
+    async def test_budzet_jest_mniejszy_niz_okno_followupu(self):
+        # po przekroczeniu budzetu followup musi jeszcze dac radę wyslac
+        self.assertLess(bot.BUDZET_ZAPYTANIA_S, 15 * 60)
+
+    async def test_wiszacy_strumien_jest_przerwany(self):
+        import asyncio
+        from unittest.mock import patch
+
+        class ZapytanieKtoreNigdyNieWraca:
+            async def __call__(self, *args, **kwargs):
+                for _ in range(3600):
+                    await asyncio.sleep(0.05)
+                return ("nie powinnismy tu dotrzec", [], None)
+
+        with patch.object(bot, "zapytaj_notebook", ZapytanieKtoreNigdyNieWraca()):
+            with self.assertRaises(asyncio.TimeoutError):
+                await bot.zapytaj_z_budzetem(None, "nb", "pytanie", None, budzet=0.1)
+
+    async def test_timeout_nie_jest_bledem_sesji(self):
+        # limit budzetu to nie wygasniecie sesji ani limit kwoty
+        import asyncio
+        self.assertFalse(bot.czy_blad_sesji(asyncio.TimeoutError()))
+
+
 class TestOpisPrzerwy(unittest.TestCase):
     """Brak klienta ma dwa rozne powody i dwa rozne naprawy.
 

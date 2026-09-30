@@ -139,6 +139,14 @@ ZLAMANIA = [
         "test_dm_wlasciciela_zamkniety_spada_na_zglaszajacego",
     ),
     (
+        "regresja: zapytanie bez terminu calkowitego wisi w nieskonczonosc",
+        b"    return await asyncio.wait_for(\n"
+        b"        zapytaj_notebook(klient, notebook_id, tresc, cid),\n"
+        b"        timeout=BUDZET_ZAPYTANIA_S if budzet is None else budzet,\n    )",
+        b"    return await zapytaj_notebook(klient, notebook_id, tresc, cid)",
+        "test_wiszacy_strumien_jest_przerwany",
+    ),
+    (
         "regresja: powiadomienie o sesji z cache zamiast z API",
         b"            uzytkownik = await bot.fetch_user(id_zglaszajacego)",
         b"            uzytkownik = bot.get_user(id_zglaszajacego)",

@@ -51,6 +51,9 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 OWNER_USER_ID = os.getenv("OWNER_USER_ID", "").strip()
 KEEPALIVE = float(os.getenv("KEEPALIVE_INTERVAL", "600"))
 CHAT_TIMEOUT = float(os.getenv("CHAT_TIMEOUT", "300"))
+# Termin całkowity zapytania. Musi być mniejszy niż okno followupu Discorda
+# (15 min) i większy niż realny czas odpowiedzi NotebookLM.
+BUDZET_ZAPYTANIA_S = float(os.getenv("BUDZET_ZAPYTANIA_S", "240"))
 
 LIMIT_DISCORD = 2000
 MAX_PODRZEDKOW = 50          # na uzytkownika; chroni pamiec procesu
@@ -325,6 +328,28 @@ async def on_close() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def zapytaj_z_budzetem(
+    klient: Any,
+    notebook_id: str,
+    tresc: str,
+    cid: str | None,
+    *,
+    budzet: float | None = None,
+) -> tuple[Any, Any, Any]:
+    """Zapytanie z CAŁKOWITYM terminem zwrotu.
+
+    `chat_timeout` biblioteki to limit pojedynczego odczytu HTTP, nie czasu
+    trwania zapytania. Strumień odpowiedzi, który trzyma połączenie otwarte
+    i wysyła kolejne bajty, nigdy go nie przekroczy — a wtedy `ask()` nie
+    wraca nigdy. Na Discordzie zostawało wtedy "myśli..." na zawsze, bo wiszący
+    `await` nie jest wyjątkiem i żaden `except` go nie złapał.
+    """
+    return await asyncio.wait_for(
+        zapytaj_notebook(klient, notebook_id, tresc, cid),
+        timeout=BUDZET_ZAPYTANIA_S if budzet is None else budzet,
+    )
+
+
 async def sprawdz_sesje(klient: Any, notebook_id: str) -> list[Any]:
     """Jedno realne wywolanie wymagajace uwierzytelnienia.
 
@@ -418,9 +443,23 @@ async def ai_dan(interaction: discord.Interaction, pytanie: str) -> None:
 
     cid = rozmowy.get(uid) if followup else None
     try:
-        odpowiedz, cytowania, nowy_cid = await zapytaj_notebook(
+        odpowiedz, cytowania, nowy_cid = await zapytaj_z_budzetem(
             _klient_nb, NOTEBOOK_ID, tresc, cid
         )
+    except asyncio.TimeoutError:
+        # To nie jest limit kwoty i nie jest wygaśnięciem sesji — NotebookLM
+        # przyjął zapytanie i nie dokończył. Licznik tego nie miesza.
+        log.warning(
+            "Zapytanie przekroczylo budzet %ss (user=%s) — strumien nie zostal domkniety",
+            BUDZET_ZAPYTANIA_S, uid,
+        )
+        await interaction.followup.send(
+            f"⏳ NotebookLM przyjął pytanie, ale nie dokończył w {BUDZET_ZAPYTANIA_S // 60} "
+            f"minut. Odpowiedź mogła być wygenerowana po stronie Notion — sprawdź "
+            f"notebook, a potem zapytaj ponownie.",
+            ephemeral=True,
+        )
+        return
     except Exception as exc:
         log.warning("Zapytanie nieudane (user=%s): %s", uid, exc)
         await interaction.followup.send(komunikat_bledu(exc), ephemeral=True)
