@@ -24,7 +24,10 @@ sys.path.insert(0, str(KATALOG))
 os.environ.setdefault("NOTEBOOKLM_HOME", "/home/srv120794/ai-dan/nlm-home")
 os.environ.pop("NOTEBOOKLM_AUTH_JSON", None)
 
-from limits import LicznikLimitow  # noqa: E402
+from limits import (  # noqa: E402
+    LicznikLimitow,
+    czy_wymaga_oczekiwania,
+)
 
 NOTEBOOK_ID = os.environ.get("NOTEBOOK_ID", "65f678e6-086c-43bf-a14a-2471286c35c0")
 LICZNIK_PLIK = Path(os.environ.get("LIMITS_FILE", str(KATALOG / "limits.json")))
@@ -121,19 +124,25 @@ async def probe(licznik: LicznikLimitow, typ: str) -> int:
         print(f"task_id={status.task_id} status={status.status} "
               f"error_code={status.error_code} error={status.error}")
 
-        if status.status == "completed":
-            await klient.artifacts.wait_for_completion(
-                NOTEBOOK_ID, status.task_id, timeout=1500.0, initial_interval=3.0
-            )
-            licznik.rejestruj_sukces(typ)
-            print("zapisano: sukces")
-            return 0
-        if licznik.rejestruj_odmowe(typ, status):
-            print("zapisano: LIMIT KWOTY")
-            return 3
-        licznik.rejestruj_odmowe(typ, status)
-        print("zapisano: awaria (nie limit)")
-        return 1
+        # generate_* prawie zawsze zwraca `pending`. Bez czekania zadanie w
+        # toku zostaloby zapisane jako awaria, a limit przychodzacy w trakcie
+        # generowania jako sukces — oba znieksztalcaja wyznaczone okno resetu.
+        if czy_wymaga_oczekiwania(status):
+            print("czekam na wynik (moze trwac kilka minut)...")
+            try:
+                status = await klient.artifacts.wait_for_completion(
+                    NOTEBOOK_ID, status.task_id, timeout=1500.0, initial_interval=3.0
+                )
+                print(f"po odczekaniu: status={status.status} "
+                      f"error_code={status.error_code} error={status.error}")
+            except Exception as exc:  # noqa: BLE001 — timeout to nie limit
+                _, opis = licznik.zapisz_wynik(typ, exc)
+                print(f"zapisano: awaria oczekiwania — {exc}")
+                return 1
+
+        to_limit, opis = licznik.zapisz_wynik(typ, status)
+        print(f"zapisano: {opis}")
+        return 3 if to_limit else (0 if opis == "sukces" else 1)
     finally:
         await klient.__aexit__(None, None, None)
 

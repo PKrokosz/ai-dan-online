@@ -191,6 +191,19 @@ ZLAMANIA_LIMITS = [
         "test_uszkodzony_plik_nie_wywraca_licznika",
     ),
     (
+        "regresja: zadanie w toku zapisywane jako awaria",
+        b'    return str(getattr(status, "status", "")) in ("pending", "in_progress")',
+        b"    return False",
+        "test_stany_w_locie_wymagaja_czekania",
+    ),
+    (
+        "regresja: jedno zdarzenie zapisywane dwa razy",
+        b"        to_limit = self.rejestruj_odmowe(typ, status, czas=czas)",
+        b"        self.rejestruj_odmowe(typ, status, czas=czas)\n"
+        b"        to_limit = self.rejestruj_odmowe(typ, status, czas=czas)",
+        "test_awaria_zapisana_dokladnie_raz",
+    ),
+    (
         "regresja: wygasanie sesji mylone z limitem kwoty",
         b"        if not czy_to_wygasniecie_sesji(wyjatek):\n            return False",
         b"        if False:\n            return False",

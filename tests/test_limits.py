@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import limits
-from limits import LicznikLimitow, czy_to_limit
+from limits import LicznikLimitow, czy_to_limit, czy_wymaga_oczekiwania
 
 H = 3600.0
 
@@ -56,6 +56,64 @@ class TestRozpoznawanieLimitu(unittest.TestCase):
         # Dopasowanie tekstu dziala tylko dla failed/removed — inaczej
         # komunikat z opisem czekajacego zadania bylby liczony jako limit
         self.assertFalse(czy_to_limit(AtrapaStatus("pending", None, "waiting for quota")))
+
+
+class TestZapisWyniku(unittest.TestCase):
+    """Rozstrzyganie limitu od awarii na KONCOWYM statusie.
+
+    W oryginale `if rejestruj_odmowe(...)` bylo wywolane dwa razy, a
+    `rejestruj_odmowe` zapisuje zawsze (do odmow albo awarii) i tylko
+    zwraca, czy to limit — jedna awaria dawala dwa zdarzenia.
+    """
+
+    def setUp(self):
+        self.katalog = tempfile.mkdtemp()
+        self.licznik = LicznikLimitow(Path(self.katalog) / "limits.json")
+
+    def test_completed_jest_sukcesem(self):
+        to_limit, opis = self.licznik.zapisz_wynik("audio", AtrapaStatus("completed"))
+        self.assertFalse(to_limit)
+        self.assertEqual(opis, "sukces")
+        self.assertEqual(self.licznik.raport("audio")["sukcesy"], 1)
+
+    def test_limit_zapisany_jako_odmowa_nie_awaria(self):
+        st = AtrapaStatus("failed", error_code="USER_DISPLAYABLE_ERROR", error="quota exceeded")
+        to_limit, opis = self.licznik.zapisz_wynik("audio", st)
+        self.assertTrue(to_limit)
+        self.assertEqual(opis, "LIMIT KWOTY")
+        r = self.licznik.raport("audio")
+        self.assertEqual((r["limity"], r["awarie_inne"]), (1, 0))
+
+    def test_awaria_zapisana_dokladnie_raz(self):
+        st = AtrapaStatus("failed", error_code="INTERNAL", error="kapot")
+        to_limit, opis = self.licznik.zapisz_wynik("audio", st)
+        self.assertFalse(to_limit)
+        self.assertEqual(opis, "awaria (nie limit)")
+        self.assertEqual(self.licznik.raport("audio")["awarie_inne"], 1)
+
+    def test_wyjatke_oczekiwania_to_awaria_nie_limit(self):
+        to_limit, _ = self.licznik.zapisz_wynik("audio", RuntimeError("timeout"))
+        self.assertFalse(to_limit)
+        self.assertEqual(self.licznik.raport("audio")["awarie_inne"], 1)
+
+    def test_pending_nie_jest_sukcesem(self):
+        # pending to nie wynik — zapisany jako sukcz zglosilby sukces tam,
+        # gdzie zadanie dopiero trwa, i wyszedlby absurdalny limit=0
+        _, opis = self.licznik.zapisz_wynik("audio", AtrapaStatus("pending"))
+        self.assertNotEqual(opis, "sukces")
+        self.assertEqual(self.licznik.raport("audio")["sukcesy"], 0)
+
+
+class TestOczekiwanieWyniku(unittest.TestCase):
+    def test_stany_w_locie_wymagaja_czekania(self):
+        for stan in ("pending", "in_progress"):
+            with self.subTest(stan=stan):
+                self.assertTrue(czy_wymaga_oczekiwania(AtrapaStatus(stan)))
+
+    def test_stany_koncowe_nie_wymagaja_czekania(self):
+        for stan in ("completed", "failed", "removed", "not_found"):
+            with self.subTest(stan=stan):
+                self.assertFalse(czy_wymaga_oczekiwania(AtrapaStatus(stan)))
 
 
 class TestLiczenie(unittest.TestCase):

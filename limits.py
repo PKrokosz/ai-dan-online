@@ -71,6 +71,16 @@ def czy_to_wygasniecie_sesji(wyjątek: BaseException) -> bool:
     return any(s in tekst for s in SYGNAŁY_WYGASŁEJ_SESJI)
 
 
+def czy_wymaga_oczekiwania(status: Any) -> bool:
+    """Czy zadanie jest jeszcze w locie i trzeba poczekac na wynik.
+
+    `generate_*` prawie zawsze zwraca `pending`, nie `completed`. Kod, ktory
+    czeka tylko na `completed`, nigdy nie doczeka i zapisze zadanie w
+    toku jako awarie.
+    """
+    return str(getattr(status, "status", "")) in ("pending", "in_progress")
+
+
 def czy_to_limit(status: Any) -> bool:
     """Czy odmowa to limit kwoty/windowu, a nie zwykla awaria.
 
@@ -250,6 +260,22 @@ class LicznikLimitow:
             return False
 
     # --- odczyt ----------------------------------------------------------
+    def zapisz_wynik(
+        self, typ: str, status: Any, *, czas: float | None = None
+    ) -> tuple[bool, str]:
+        """Zapisuje wynik generowania: jeden wynik = jedno zdarzenie.
+
+        Zwraca `(czy_limit, opis)`. Wyjatkiem moze byc `status` — timeout
+        oczekiwania nie jest limitem, wiec trafia do awarii, a nie do odmow.
+        Wywolywanie `rejestruj_odmowe` dwa razy pod rzad dalo dwa zdarzenia
+        z jednego zdarzenia, bo zapisuje niezaleznie od wyniku testu limitu.
+        """
+        if str(getattr(status, "status", "")) == "completed":
+            self.rejestruj_sukces(typ, czas=czas)
+            return False, "sukces"
+        to_limit = self.rejestruj_odmowe(typ, status, czas=czas)
+        return to_limit, ("LIMIT KWOTY" if to_limit else "awaria (nie limit)")
+
     def zdarzenia(self, typ: str) -> list[Wydarzenie]:
         return self._stan(typ).wszystkie
 
