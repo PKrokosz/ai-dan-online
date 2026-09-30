@@ -89,6 +89,29 @@ def _iso(czas: float | None) -> str | None:
     return datetime.fromtimestamp(czas, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def czy_to_awaria_transportowa(status: Any) -> bool:
+    """Czy status wynika z awarii sieci/transportu, a nie z decyzji Google.
+
+    Zmierzone 30.09: `LIST_ARTIFACTS` zwrocilo HTTP 502 podczas odpytywania
+    o zadanie. Biblioteka nie zobaczyla go na liscie i po 5 kolejnych
+    "not-found" orzekla `removed` — czyli dokladnie to, co myli o limicie
+    kwoty. Zadanie zostalo potem wygenerowane sukcesywnie (completed, 30 MB),
+    wiec zapisany limit byl nieprawdziwy, a okno resetu wyliczone z niego
+    byloby zmyolone.
+
+    Awaria transportowa NIE jest limitem. Roznica jest operacyjna: limit da
+    sie zakomunikowac uzytkownikowi, awaria sieci wymaga ponowienia.
+    """
+    tekst = str(status).lower()
+    if not isinstance(status, str) and getattr(status, "error", None):
+        tekst = f"{tekst} {status.error}".lower()
+    for znacznik in ("transportservererror", "502", "503", "504", "timeout",
+                     "timed out", "connection", "network", "temporar"):
+        if znacznik in tekst:
+            return True
+    return False
+
+
 def czy_to_limit(status: Any) -> bool:
     """Czy odmowa to limit kwoty/windowu, a nie zwykla awaria.
 
@@ -96,7 +119,13 @@ def czy_to_limit(status: Any) -> bool:
     ma pierwszenstwo, tekst jest zapasem dla starszych odpowiedzi. Status
     `removed` liczymy tak samo jak `failed` — Google potrafi po cichu zdjąc
     artefakt po odmowie.
+
+    Zwykla awaria transportowa NIE jest limitem, nawet przy statusie
+    `removed`: zdarzylo sie 30.09, gdy 502 na liscie artefaktow wygladalo
+    jak usunięcie zadania przez limit.
     """
+    if czy_to_awaria_transportowa(status):
+        return False
     if str(getattr(status, "status", "")) not in STATUSY_ODMOWY:
         return False
     kod = getattr(status, "error_code", None)

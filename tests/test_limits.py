@@ -27,6 +27,10 @@ class AtrapaStatus:
         self.error = error
 
 
+class TransportServerError(Exception):
+    """Nazwa jak w bibliotece — `notebooklm` rzuca ja na 502/503/504."""
+
+
 def BLED_SESJI() -> ValueError:
     """Realny komunikat biblioteki — rozpoznawany przez `czy_to_wygasniecie_sesji`."""
     return ValueError(
@@ -256,6 +260,57 @@ class TestOdwiezanieNieZasmieczaLicznika(unittest.TestCase):
         self.assertFalse(nowy.rejestruj_sesje_zywa(czas=2000.0),
                          "po reloadzie tez nie moze dopisac")
         self.assertEqual(nowy.raport_sesji()["logowania"], 1)
+
+
+class TestAwariaTransportowaNieJestLimitem(unittest.TestCase):
+    """502 na liscie artefaktow wygladalo jak limit — i nim nie bylo.
+
+    Zmierzone 30.09: `LIST_ARTIFACTS` zwrocilo HTTP 502 podczas odpytywania
+    o zadanie audio. Biblioteka nie zobaczyla go na liscie, po 5 kolejnych
+    "not-found" orzekla `removed`, a licznik zapisal LIMIT KWOTY. Zadanie
+    zostalo potem wygenerowane sukcesywnie (completed, 30,35 MB), wiec limit
+    byl nieprawdziwy, a okno resetu z niego — zmyolone.
+    """
+
+    def test_removed_przy_awarii_sieci_to_nie_limit(self):
+        st = AtrapaStatus("removed", error_code="USER_DISPLAYABLE_ERROR")
+        st.transport_error = "HTTP 502 Bad Gateway"
+        # sygnal transportu w polu error biblioteki
+        st.error = "TransportServerError: HTTP 502"
+        self.assertFalse(czy_to_limit(st), "502 nie jest limitem kwoty")
+
+    def test_removed_bez_awarii_sieci_nadal_limit(self):
+        st = AtrapaStatus("removed", error_code="USER_DISPLAYABLE_ERROR",
+                          error="Artifact removed after limit reached")
+        self.assertTrue(czy_to_limit(st), "prawdziwy limit musi zostac limitem")
+
+    def test_502_w_statusie_jako_tekst(self):
+        self.assertFalse(czy_to_limit(TransportServerError("HTTP 502 Bad Gateway")))
+
+    def test_503_i_timeout_to_nie_limit(self):
+        for tekst in ["HTTP 503 Service Unavailable", "ReadTimeout: timed out",
+                      "Connection reset by peer"]:
+            with self.subTest(tekst=tekst):
+                st = AtrapaStatus("removed", error_code="USER_DISPLAYABLE_ERROR",
+                                  error=tekst)
+                self.assertFalse(czy_to_limit(st))
+
+    def test_zwykla_awaria_nadal_awaria(self):
+        st = AtrapaStatus("failed", error_code="INTERNAL",
+                          error="NullPointerException")
+        self.assertFalse(czy_to_limit(st))
+
+    def test_odmowa_sie_zapisuje_w_liczniku(self):
+        # calka sciezka: zdarzenie nie trafia do odmow, tylko do awarii
+        katalog = tempfile.mkdtemp()
+        licznik = LicznikLimitow(Path(katalog) / "limits.json")
+        st = AtrapaStatus("removed", error_code="USER_DISPLAYABLE_ERROR",
+                          error="HTTP 502 Bad Gateway")
+        to_limit, opis = licznik.zapisz_wynik("audio", st)
+        self.assertFalse(to_limit)
+        r = licznik.raport("audio")
+        self.assertEqual(r["limity"], 0, "502 trafil do limitow")
+        self.assertEqual(r["awarie_inne"], 1)
 
 
 class TestLiczenie(unittest.TestCase):

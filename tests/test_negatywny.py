@@ -211,6 +211,14 @@ ZLAMANIA_LIMITS = [
         "test_uszkodzony_plik_nie_wywraca_licznika",
     ),
     (
+        "regresja: awaria 502 zapisywana jako limit kwoty (zdarzylo sie 30.09)",
+        b"    for znacznik in (\"transportservererror\", \"502\", \"503\", \"504\", \"timeout\",\n"
+        b"                     \"timed out\", \"connection\", \"network\", \"temporar\"):\n"
+        b"        if znacznik in tekst:\n            return True",
+        b"    return False",
+        "test_removed_przy_awarii_sieci_to_nie_limit",
+    ),
+    (
         "regresja: odwiezanie mnozy logowania (96 rund = 96 zdarzen)",
         b"            ostatnie_logowanie = max((w.czas for w in self.logowania), default=None)\n"
         b"            if ostatnie_logowanie is not None and (\n"
