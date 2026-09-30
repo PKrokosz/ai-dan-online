@@ -25,6 +25,8 @@ import asyncio
 import logging
 import os
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import unicodedata
@@ -380,6 +382,131 @@ def _opis_przerwy() -> tuple[str, bool]:
         "🔌 Bot nie ma klienta NotebookLM — sprawdź log i zrestartuj usługę.",
         False,
     )
+
+
+@tree.command(name="artefakty", description="Gotowe materiały z notatnika (nie generuje)")
+async def artefakty(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(thinking=True)
+    if _klient_nb is None:
+        await interaction.followup.send(_opis_przerwy()[0], ephemeral=True)
+        return
+
+    import artifacts
+    try:
+        znalezione = await artifacts.zbierz(_klient_nb)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Artefakty nieodczytane: %s", exc)
+        await interaction.followup.send(f"Nie udało się odczytać artefaktów: {exc}"[:400],
+                                       ephemeral=True)
+        await zareaguj_na_wygasla_sesje(interaction.client, exc, interaction.user.id)
+        return
+
+    gotowe = [w for w in znalezione if "blad" not in w]
+    if not gotowe:
+        await interaction.followup.send(
+            "W notatniku nie ma jeszcze gotowych materiałów. "
+            "Generowanie dojdzie wraz z komendami `/audio` i `/infografika`.",
+            ephemeral=True)
+        return
+
+    linie = [f"**Gotowe materiały** ({len(gotowe)}) — wysyłanie nie zjada limitu", ""]
+    for w in gotowe:
+        linie.append(artifacts.opis(w))
+        linie.append("")
+    await interaction.followup.send("\n".join(linie)[:1900])
+    log.info("Wypisano %d artefaktow dla %s", len(gotowe), interaction.user.id)
+
+
+@tree.command(name="pobierz", description="Wyślij gotowy materiał na Discorda")
+@app_commands.describe(id="Pierwsze 8 znaków id z listy /artefakty")
+async def pobierz(interaction: discord.Interaction, id: str) -> None:  # noqa: A002
+    await interaction.response.defer(thinking=True)
+    if _klient_nb is None:
+        await interaction.followup.send(_opis_przerwy()[0], ephemeral=True)
+        return
+
+    import artifacts
+    ident = str(id).strip().lower()
+    try:
+        znalezione = await artifacts.zbierz(_klient_nb)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Artefakty nieodczytane: %s", exc)
+        await interaction.followup.send(f"Nie udało się odczytać artefaktów: {exc}"[:400],
+                                       ephemeral=True)
+        await zareaguj_na_wygasla_sesje(interaction.client, exc, interaction.user.id)
+        return
+
+    trafiony = next((w for w in znalezione
+                     if w.get("id", "").lower().startswith(ident)), None)
+    if trafiony is None:
+        await interaction.followup.send(
+            f"Nie znalazłem artefaktu o id `{ident[:12]}`. "
+            f"Wpisz `/artefakty`, żeby zobaczyć listę.", ephemeral=True)
+        return
+    if "url" not in trafiony:
+        await interaction.followup.send(
+            "Nie mam adresu pliku dla tego artefaktu.", ephemeral=True)
+        return
+    if trafiony.get("miesci") is False:
+        await interaction.followup.send(
+            f"**{trafiony['tytul']}** — {trafiony['mb']:.2f} MB, a limit Discorda to 10 MiB.\n"
+            f"Nie wysyłam: plik zostałby przycięty albo odrzucony. "
+            f"Podział na części dojdzie wraz z komendami generowania.",
+            ephemeral=True)
+        return
+
+    try:
+        await pobierz_i_wyslij(_klient_nb, trafiony, interaction)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Wyslanie artefaktu nieudane: %s", exc)
+        await interaction.followup.send(f"Nie udało się wysłać pliku: {exc}"[:300],
+                                       ephemeral=True)
+        return
+    log.info("Wyslano artefakt %s (%s MB) dla %s", trafiony["id"][:8],
+             trafiony.get("mb"), interaction.user.id)
+
+
+async def pobierz_i_wyslij(klient: Any, wpis: dict[str, Any],
+                           interaction: discord.Interaction) -> None:
+    """Sciaga plik na serwer i wysyla go jako zalacznik.
+
+    Rozmiar sprawdzony w `artifacts.zbierz` — do tego miejsca trafiaja tylko
+    pliki mieszcze sie w 10 MiB. Plik tymczasowy znika niezaleznie od
+    wyniku, wiec nic nie zostaje na serwerze.
+    """
+    import hashlib
+
+    katalog = Path(tempfile.gettempdir()) / "ai-dan-art"
+    katalog.mkdir(parents=True, exist_ok=True)
+    nazwa = f"{wpis['id'][:8]}.mp3"
+    sciezka = katalog / nazwa
+    try:
+        dane = await pobierz_bajty(klient, wpis["url"])
+        sciezka.write_bytes(dane)
+        await interaction.followup.send(
+            content=f"**{wpis['tytul']}**\n{wpis['mb']:.2f} MB · {wpis['utworzono']}",
+            file=discord.File(str(sciezka), filename=nazwa))
+        log.info("Artefakt %s wyslany (%s B, md5=%s)", wpis["id"][:8], len(dane),
+                 hashlib.md5(dane).hexdigest()[:8])
+    finally:
+        try:
+            sciezka.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+async def pobierz_bajty(klient: Any, url: str) -> bytes:
+    """Pobiera plik przez sesje Google — URL jest prywatny, nie zadziala bez niej."""
+    import httpx
+    from notebooklm._auth import cookies as auth_cookies
+
+    jar = auth_cookies.build_httpx_cookies_from_storage(
+        Path(os.environ["NOTEBOOKLM_HOME"]) / "storage_state.json")
+    async with httpx.AsyncClient(cookies=jar, timeout=300.0,
+                                 follow_redirects=True) as http:
+        odpowiedz = await http.get(url)
+        odpowiedz.raise_for_status()
+        return odpowiedz.content
 
 
 @tree.command(name="test", description="Sprawdź, czy bot działa")
