@@ -139,6 +139,12 @@ ZLAMANIA = [
         "test_dm_wlasciciela_zamkniety_spada_na_zglaszajacego",
     ),
     (
+        "regresja: handler konczy sie bez wyslania odpowiedzi",
+        b"    await _zakoncz_interakcje(interaction, uid, odpowiedz, cytowania, nowy_cid)",
+        b"    global _powiadomiono_o_sesji\n\n_powiadomiono_o_sesji = False\n_licznik: Any = None",
+        "test_odpowiedz_dociera_do_uzytkownika",
+    ),
+    (
         "regresja: zapytanie bez terminu calkowitego wisi w nieskonczonosc",
         b"    return await asyncio.wait_for(\n"
         b"        zapytaj_notebook(klient, notebook_id, tresc, cid),\n"

@@ -296,6 +296,80 @@ class TestTerminZapytania(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bot.czy_blad_sesji(asyncio.TimeoutError()))
 
 
+class TestOgonInterakcji(unittest.IsolatedAsyncioTestCase):
+    """Handler musi dokladnie raz wywolac wysylke odpowiedzi.
+
+    Ogon handlera `/ai-dan` zostal swiadomie odciety przez zla edycje:
+    po `except` nastepowalo `global _powiadomiono_o_sesji`, ktore zakonczylo
+    funkcje, a reszta zostala martwym kodem wewnatrz innej funkcji. Handler
+    konczyl sie bez wyslania czegokolwiek — na Discordzie "mysli..." na
+    zawsze, bez wyjatku i bez logu, bo nie bylo czego zlapac. Wszystkie
+    testy przechodzily, bo zadna nie wolala handlera.
+    """
+
+    async def test_handler_wywoluje_wysylke(self):
+        # Testy powyzej wolaja `_zakoncz_interakcje` wprost, wiec nie
+        # wykrylyby znikniecia tego wywolania z handlera — a to wlasnie
+        # bylo uszkodzenie. Sprawdzamy wiec zrodlo handlera.
+        import inspect
+
+        # `ai_dan` to obiekt Command — funkcja siedzi w `.callback`.
+        zrodlo = inspect.getsource(bot.ai_dan.callback)
+        self.assertIn("_zakoncz_interakcje(", zrodlo,
+                      "handler nie wysyla odpowiedzi — nic nie zostanie dostarczone")
+        # Znacznik rozdzielenia funkcji na pol: `global` w ciele handlera.
+        self.assertNotIn("\n    global ", zrodlo,
+                         "handler uciety w miejscu `global` — ogon jest martwy")
+
+    async def test_odpowiedz_dociera_do_uzytkownika(self):
+        class Followup:
+            def __init__(self):
+                self.wyslane = []
+
+            async def send(self, tresc, **kwargs):
+                self.wyslane.append(tresc)
+
+        class Interaction:
+            def __init__(self):
+                self.followup = Followup()
+
+        interakcja = Interaction()
+        bot.rozmowy.clear()
+        await bot._zakoncz_interakcje(interakcja, 42, "Odpowiedz.", [], "cid-1")
+        self.assertEqual(len(interakcja.followup.wyslane), 1, "nic nie wyszlo")
+        self.assertIn("Odpowiedz.", interakcja.followup.wyslane[0])
+
+    async def test_pusta_odpowiedz_dostaje_inny_komunikat(self):
+        class Followup:
+            def __init__(self):
+                self.wyslane = []
+
+            async def send(self, tresc, **kwargs):
+                self.wyslane.append(tresc)
+
+        class Interaction:
+            def __init__(self):
+                self.followup = Followup()
+
+        interakcja = Interaction()
+        await bot._zakoncz_interakcje(interakcja, 42, "   ", [], None)
+        self.assertEqual(len(interakcja.followup.wyslane), 1)
+        self.assertIn("nie zawiera odpowiedzi", interakcja.followup.wyslane[0])
+
+    async def test_follow_up_zapisuje_rozmowe(self):
+        class Followup:
+            async def send(self, tresc, **kwargs):
+                pass
+
+        class Interaction:
+            def __init__(self):
+                self.followup = Followup()
+
+        bot.rozmowy.clear()
+        await bot._zakoncz_interakcje(Interaction(), 42, "odp.", [], "cid-abc")
+        self.assertEqual(bot.rozmowy.get(42), "cid-abc")
+
+
 class TestOpisPrzerwy(unittest.TestCase):
     """Brak klienta ma dwa rozne powody i dwa rozne naprawy.
 

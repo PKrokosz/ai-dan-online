@@ -466,7 +466,9 @@ async def ai_dan(interaction: discord.Interaction, pytanie: str) -> None:
         await zareaguj_na_wygasla_sesje(interaction.client, exc, uid)
         return
 
-    global _powiadomiono_o_sesji
+    await _zakoncz_interakcje(interaction, uid, odpowiedz, cytowania, nowy_cid)
+
+
 _powiadomiono_o_sesji = False
 _licznik: Any = None
 
@@ -510,6 +512,22 @@ async def zareaguj_na_wygasla_sesje(bot: Any, exc: BaseException, uid: int) -> b
     await powiadom_o_wygaslej_sesji(bot, [], uid)
     return True
 
+
+async def _zakoncz_interakcje(
+    interaction: discord.Interaction,
+    uid: int,
+    odpowiedz: str,
+    cytowania: list[Any],
+    nowy_cid: str | None,
+) -> None:
+    """Zapisuje follow-up i wysyla odpowiedz do uzytkownika.
+
+    Osobna funkcja, nie ogon handlera: ta czesc zostala swiadomie
+    odcieta przez zla edycje, przez co `/ai-dan` konczyl sie bez wyslania
+    czegokolwiek — na Discordzie zostawalo "mysli..." na zawsze, bez
+    wyjatku i bez logu, bo nie bylo czego zlapac. Wyciagniecie tego
+    ogona do funkcji daje test, ktory w ogole da sie napisac.
+    """
     if nowy_cid:
         if len(rozmowy) >= MAX_PODRZEDKOW and uid not in rozmowy:
             rozmowy.pop(next(iter(rozmowy)))
