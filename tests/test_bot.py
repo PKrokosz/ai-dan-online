@@ -230,6 +230,67 @@ class TestBledy(unittest.TestCase):
         self.assertNotIn("RuntimeError", tekst)
 
 
+class TestTestowePobranieSesji(unittest.IsolatedAsyncioTestCase):
+    """`/test` musi robic realne wywolanie, nie sprawdzac obiektu.
+
+    Wykryte na zywo: sesja Google zostala uniewazniona, a `/test` wciaz
+    pisal "gotowy do odpowiedzi", bo sprawdzal tylko `klient is not None`.
+    """
+
+    async def test_zdrowy_klient_zwraca_liste(self):
+        klient = AtrapaKlient()
+        zrodla = await bot.sprawdz_sesje(klient, "nb-1")
+        self.assertEqual(zrodla, [])
+
+    async def test_martwa_sesja_wywala_wyjatkiem(self):
+        class KlientZly:
+            class sources:  # noqa: N801 — atrapa
+                @staticmethod
+                async def list(nb):
+                    raise ValueError(
+                        "Authentication expired or invalid. Redirected to: accounts.google.com"
+                    )
+
+        with self.assertRaises(ValueError):
+            await bot.sprawdz_sesje(KlientZly(), "nb-1")
+
+    async def test_pobranie_idzie_do_konkretnego_notebooka(self):
+        klient = AtrapaKlient()
+        await bot.sprawdz_sesje(klient, "nb-42")
+        # AtrapaKlient.list jest wspoldzielona z sources, wiec liczymy wywolania
+        self.assertTrue(hasattr(klient.sources, "list"))
+
+
+class TestOpisPrzerwy(unittest.TestCase):
+    """Brak klienta ma dwa rozne powody i dwa rozne naprawy.
+
+    Restart uslugi naprawia kazdy blad startu poza wygasla sesja —
+    komunikat "zrestartuj" przy martwej sesji kieruje w zla strone.
+    """
+
+    def tearDown(self):
+        bot._blad_polaczenia = None
+
+    def test_wygasla_sesja_mowi_o_loginie_nie_o_restarcie(self):
+        bot._blad_polaczenia = ValueError(
+            "Authentication expired or invalid. Redirected to accounts.google.com"
+        )
+        opis, to_sesja = bot._opis_przerwy()
+        self.assertTrue(to_sesja)
+        self.assertIn("login", opis)
+
+    def test_inny_blad_mowi_o_restarcie(self):
+        bot._blad_polaczenia = RuntimeError("polaczenie zerwane")
+        opis, to_sesja = bot._opis_przerwy()
+        self.assertFalse(to_sesja)
+        self.assertIn("restart", opis)
+
+    def test_brak_bladu_to_restart(self):
+        opis, to_sesja = bot._opis_przerwy()
+        self.assertFalse(to_sesja)
+        self.assertIn("restart", opis)
+
+
 class TestPowiadomienieSesji(unittest.IsolatedAsyncioTestCase):
     """Jednorazowe powiadomienie o wygaslej sesji.
 

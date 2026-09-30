@@ -139,6 +139,18 @@ ZLAMANIA = [
         "test_dm_wlasciciela_zamkniety_spada_na_zglaszajacego",
     ),
     (
+        "regresja: wygasla sesja kierowana do restartu uslugi",
+        b"    if _blad_polaczenia is not None and czy_blad_sesji(_blad_polaczenia):",
+        b"    if _blad_polaczenia is not None and False:",
+        "test_wygasla_sesja_mowi_o_loginie_nie_o_restarcie",
+    ),
+    (
+        "regresja: /test zglasza zdrowie bez sprawdzenia sesji",
+        b"    return await klient.sources.list(notebook_id)",
+        b"    return []",
+        "test_martwa_sesja_wywala_wyjatkiem",
+    ),
+    (
         "regresja: awaria wysylki powiadomienia wywraca bota",
         b"        except Exception as exc:  # noqa: BLE001\n            log.error(\"Nie udalo sie powiadomic uzytkownika",
         b"        except Exception as exc:  # noqa: BLE001\n            raise exc\n        finally:\n            _ = \"Nie udalo sie powiadomic uzytkownika",

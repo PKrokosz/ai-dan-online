@@ -265,12 +265,16 @@ _klient_nb: Any = None
 rozmowy: dict[int, str] = {}
 
 
+_blad_polaczenia: BaseException | None = None
+
+
 async def _zbuduj_klienta_nb() -> None:
-    global _nb_cm, _klient_nb
+    global _nb_cm, _klient_nb, _blad_polaczenia
     _nb_cm = NotebookLMClient.from_storage(
         keepalive=KEEPALIVE, chat_timeout=CHAT_TIMEOUT
     )
     _klient_nb = await _nb_cm.__aenter__()
+    _blad_polaczenia = None
     log.info("NotebookLM: klient gotowy (keepalive=%ss, chat_timeout=%ss)", KEEPALIVE, CHAT_TIMEOUT)
 
 
@@ -287,11 +291,13 @@ async def _zamknij_klienta_nb() -> None:
 
 @client.event
 async def on_ready() -> None:
-    log.info("ai-dan online jako %s (ID: %s)", client.user, client.user.id)
+    global _blad_polaczenia
+    log.info("ai-dan online jako %s (ID=%s)", client.user, client.user.id)
     try:
         await _zbuduj_klienta_nb()
     except Exception as exc:
-        # Bot startuje, ale nie odpowie — lepiej powiedziec to wprost
+        # Bot startuje, ale nie odpowie - lepiej powiedziec to wprost
+        _blad_polaczenia = exc
         log.error("NotebookLM: nie moge sie polaczyc (%s). /ai-dan bedzie zwracac blad.", exc)
     try:
         zsynchronizowane = await tree.sync()
@@ -312,10 +318,64 @@ async def on_close() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def sprawdz_sesje(klient: Any, notebook_id: str) -> list[Any]:
+    """Jedno realne wywolanie wymagajace uwierzytelnienia.
+
+    Samo `klient is not None` nie znaczy nic: klient zbudowany wczoraj
+    moze miec sesje uniewazniona przez Google, a obiekt dalej istnieje.
+    Tak wlasnie `/test` zglaszil "gotowy do odpowiedzi" na martwej sesji.
+    `sources.list` to najtaniejsi RPC wymagajacy tokenu, wiec nadaje sie na
+    puls. Wyjatki nie lapemy — caller musi je zobaczyc.
+    """
+    return await klient.sources.list(notebook_id)
+
+
+def _opis_przerwy() -> tuple[str, bool]:
+    """Komunikat o braku klienta + czy powodem jest wygasla sesja.
+
+    Rozroznienie jest istotne operacyjnie: restart uslugi NIE naprawia
+    wygaslej sesji, a naprawia kazdy inny blad startu. Meldowanie
+    "zrestartuj usluge" przy martwej sesji kieruje w zla strone.
+    """
+    if _blad_polaczenia is not None and czy_blad_sesji(_blad_polaczenia):
+        return (
+            "🔑 **Sesja Google do NotebookLM wygasła** — dlatego nie ma klienta.\n"
+            "Bot nie odpowie, dopóki sesja nie zostanie odnowiona "
+            "(`notebooklm login`, potem restart usługi).",
+            True,
+        )
+    return (
+        "🔌 Bot nie ma klienta NotebookLM — sprawdź log i zrestartuj usługę.",
+        False,
+    )
+
+
 @tree.command(name="test", description="Sprawdź, czy bot działa")
 async def test(interaction: discord.Interaction) -> None:
-    stan = "gotowy do odpowiedzi" if _klient_nb is not None else "BEZ połączenia z notebookiem"
-    await interaction.response.send_message(f"🤖 ai-dan działa. NotebookLM: {stan}.")
+    uid = interaction.user.id
+    if _klient_nb is None:
+        await interaction.response.send_message(_opis_przerwy()[0])
+        if _blad_polaczenia is not None:
+            await zareaguj_na_wygasla_sesje(interaction.client, _blad_polaczenia, uid)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        zrodla = await sprawdz_sesje(_klient_nb, NOTEBOOK_ID)
+    except Exception as exc:  # noqa: BLE001 — chcemy wypisac powod
+        log.warning("Test sesji nieudany: %s", exc)
+        await interaction.followup.send(
+            f"⚠️ Klient istnieje, ale **sesja do notebooka nie działa**.\n"
+            f"Powód: {str(exc)[:200]}\n"
+            f"Bot nie odpowie na pytania, dopóki sesja nie zostanie odnowiona."
+        )
+        await zareaguj_na_wygasla_sesje(interaction.client, exc, uid)
+        return
+
+    await interaction.followup.send(
+        f"🤖 ai-dan działa. NotebookLM: gotowy do odpowiedzi "
+        f"(sprawdzone {len(zrodla)} źródeł)."
+    )
 
 
 @tree.command(name="ai-dan", description="Zadaj pytanie pomocnikowi Mistrza Gry")
@@ -333,10 +393,9 @@ async def ai_dan(interaction: discord.Interaction, pytanie: str) -> None:
         )
         return
     if _klient_nb is None:
-        await interaction.followup.send(
-            "🔌 Bot nie ma połączenia z notebookem. Administrator musi zrestartować usługę.",
-            ephemeral=True,
-        )
+        await interaction.followup.send(_opis_przerwy()[0], ephemeral=True)
+        if _blad_polaczenia is not None:
+            await zareaguj_na_wygasla_sesje(interaction.client, _blad_polaczenia, uid)
         return
 
     tresc, followup = podziel_pytanie(pytanie)
@@ -358,12 +417,52 @@ async def ai_dan(interaction: discord.Interaction, pytanie: str) -> None:
     except Exception as exc:
         log.warning("Zapytanie nieudane (user=%s): %s", uid, exc)
         await interaction.followup.send(komunikat_bledu(exc), ephemeral=True)
-        if czy_blad_sesji(exc):
-            await powiadom_o_wygaslej_sesji(interaction.client, bledy, uid)
+        await zareaguj_na_wygasla_sesje(interaction.client, exc, uid)
         return
 
     global _powiadomiono_o_sesji
-    _powiadomiono_o_sesji = False
+_powiadomiono_o_sesji = False
+_licznik: Any = None
+
+
+def _pobierz_licznika() -> Any:
+    """Licznik limitow z katalogu aplikacji. Brak pliku nie moze wywrocic bota."""
+    global _licznik
+    if _licznik is None:
+        try:
+            from limits import LicznikLimitow
+        except Exception as exc:  # noqa: BLE001 — telemetry nie jest krytyczna
+            log.debug("Licznik limitow niedostepny: %s", exc)
+            return None
+        sciezka = os.getenv(
+            "LIMITS_FILE",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "limits.json"),
+        )
+        try:
+            _licznik = LicznikLimitow(sciezka)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Nie udalo sie otworzyc licznika limitow: %s", exc)
+            return None
+    return _licznik
+
+
+async def zareaguj_na_wygasla_sesje(bot: Any, exc: BaseException, uid: int) -> bool:
+    """Jedna reakcja na wygasla sesje: zapis w liczniku + powiadomienie.
+
+    Wspoldzielona przez `/test` i `/ai-dan`, bo incydent jest ten sam.
+    Zwraca True tylko gdy blad faktycznie dotyczy sesji — limit kwoty
+    obsluguje osobno sciezka generowania.
+    """
+    if not czy_blad_sesji(exc):
+        return False
+    licznik = _pobierz_licznika()
+    if licznik is not None:
+        try:
+            licznik.rejestruj_wygasniecie_sesji(exc)
+        except Exception as blad_zapisu:  # noqa: BLE001
+            log.warning("Zapis w liczniku limitow nieudany: %s", blad_zapisu)
+    await powiadom_o_wygaslej_sesji(bot, [], uid)
+    return True
 
     if nowy_cid:
         if len(rozmowy) >= MAX_PODRZEDKOW and uid not in rozmowy:
