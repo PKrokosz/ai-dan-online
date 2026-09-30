@@ -86,3 +86,83 @@ przygotowaniami do Larp Gothic 2026”.
 Bot z sekretami stał w `public/`, czyli w webroocie — `.htaccess` blokował `.env`
 na LiteSpeed, ale nie na nginxie, a bot **nie ma żadnego interfejsu webowego** i
 webroota nie potrzebuje. Kod przeniesiony do osobnego repo, poza webrootem.
+
+---
+
+# 30 września 2026: pięć zielonych bramek i jeden nieistniejący bot
+
+Najważniejsza część tej historii, bo dotyczy błędów, których **nie wykryła żadna
+bramka**.
+
+## Fałszywe zielone
+
+**1. `/test` kłamał.** Odpowiadał „gotowy do odpowiedzi", sprawdzając wyłącznie
+`klient is not None`. Klient zbudowany wcześniej zostaje w pamięci dokładnie tak
+samo po unieważnieniu sesji przez Google. Wykryte przez zrzut ekranu rozmówcy —
+nie przez testy.
+
+**2. Powiadomienie o awarii nie zadziałało ani razu.** `get_user()` czyta wyłącznie
+cache Discorda i zwraca `None`. Bot jest slash-only i bez `message_content`, więc
+cache jest pusty — `get_user` zwracał `None` **zawsze**. Mechanizm zbudowany
+po to, żeby powiedzieć właścicielowi o awarii, milczał przy pierwszej awarii.
+Testy tego nie wykryły, bo atrapa Discorda w testach miała `get_user` zwracające
+użytkownika. **Atrapa była ładniejsza niż produkcja.**
+
+**3. Keepalive raportował zdrowie, którego nie mierzył.** `RotateCookies` co 10
+minut zwracał `200 OK` przez 80 minut — w tym czasie sesja była już bezużyteczna.
+
+**4. Życie sesji policzone z odstępu między wykryciami.** Jedna martwa sesja
+zgłoszona o10:57 i 11:32 dała „zycie sesji: 0,58 h" — liczbę wyglądającą jak
+wiedza o częstotliwości wygasania. Liczy się teraz z pary **logowanie →
+wygaśnięcie**, a bez pary raport oddaje `None` **z powodem**.
+
+## Wiszący await i ucięty handler — ten sam objaw
+
+Rozmówca zgłosił „myśli..." bez obsługi błędu. Dwa różne błędy dawały **dokładnie
+ten sam objaw**:
+
+| | |
+|---|---|
+| `chat_timeout` biblioteki to **per-read**, nie całkowity | strumień trzymający połączenie nigdy go nie przekracza |
+| handler `/ai-dan` **uwięziony złym wcięciem** | `global` miał wcięcie, przypisanie po nim nie — koniec funkcji |
+
+W obu przypadkach: brak wyjątku, brak logu, wieczne „myśli...".
+
+Rozstrzygnął to skrypt czekający na wynik i czytający log, nie zgadywanie:
+`RotateCookies` leciał dalej (pętla żyje), a termin 240 s się nie oglosił — więc
+wisiał await **poza** `wait_for`.
+
+Ucięcie powstało **w mojej edycji pliku** i wcześniej rozcięło już `async def
+_zbuduj_klienta_nb`. Ten sam błąd dwa razy.
+
+## Wzorzec: złamanie, które niczego nie chroni
+
+Trzy razy w jednej sesji złamanie zgłosiło `BRAK`, bo test sprawdzał **wyciągniętą
+jednostkę** zamiast **okablowania**:
+
+1. powiadomienie — atrapa miała działający `get_user`,
+2. termin zapytania — test sprawdzał stałą, nie wywołanie `wait_for`,
+3. ogon handlera — testy wołały `_zakoncz_interakcje` wprost, a handler mógł
+   nie wywoływać go wcale.
+
+Reguła: **złamanie, które nie robi żadnego testu czerwonym, jest złamaniem,
+które udaje ochronę.** Każde z nich wymagało oddzielenia logiki od handlerów,
+żeby dało się ją przetestować. Ostatnie dwa złamania naprawiały się same —
+gdy test robił to samo co kod produkcyjny.
+
+## Czego nie dało się odtworzyć testem
+
+Sesji Google wygasła w **2,5 godziny** od wdrożenia, przy ciasteczkach ważnych
+**365 dni**. `auth refresh` odmówił (`Token fetch failed`). Plik był nietknięty.
+Google unieważnił sesję po swojej stronie; najbardziej prawdopodobne, że przez
+to samo konto używane z dwóch IP — **niepotwierdzone**.
+
+Odnowienie wymaga wpisania hasła i ewentualnego 2FA przez człowieka. **Nie da się
+tego zautomatyzować** — i dlatego celem jest nie niezawodność, lecz wykrywalność:
+bot zgłasza sam, po jednym wykryciu, a procedura odnowienia jest udokumentowana.
+
+Ścieżka bez haseł (`--browser-cookies` + `rookiepy`) też jest zamknięta, tym razem
+nie z powodu polityki, lecz szyfrowania: ciasteczka Chrome 127+ są w formacie
+`v20` (app-bound), a klucz ma wyłącznie sam Chrome. Kopia profilu **nie** działa —
+Chrome kasuje w niej bazę. Odczyt z oryginalnego katalogu działa, ale wymaga
+zamknięcia przeglądarki.

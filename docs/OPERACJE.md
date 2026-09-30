@@ -64,11 +64,44 @@ NotebookLM, nie cache bota.
 | Objaw | Przyczyna | Co zrobić |
 |---|---|---|
 | `Brak zmiennych środowiskowych` | `.env` nie wskazany lub nieczytelny | `python run.py --env <ścieżka>` |
-| `Authentication expired or invalid` | wygasła sesja Google | `notebooklm login --browser chrome`, potem `notebooklm auth check --test --json` |
+| `Authentication expired or invalid` | wygasła sesja Google | `docs/WDROZENIE-SERWER.md` → „Odnowienie sesji" |
 | `Notebook not found` | złe `NOTEBOOK_ID` | `notebooklm list` i porównaj ID |
-| komendy nie widać na serwerze | globalna synchronizacja | `gh`-owy limit Discorda; zsynczuj do gildi (`docs/ZNANE-PROBLEMY.md`) |
-| bot online, ale odpowiada „co dzisiaj” | stare zachowanie w kontekście rozmowy | `notebooklm auth check --test`; sprawdź, czy źródło z aktualizacją jest w notatniku |
-| `RateLimitError` | za dużo pytań | poczekaj; `RATE_LIMIT` obsługuje komunikat dla użytkownika |
+| komendy nie widać na serwerze | globalna synchronizacja | limit Discorda; zsynczuj do gildi (`docs/ZNANE-PROBLEMY.md`) |
+| bot online, ale odpowiada „co dzisiaj” | stare zachowanie w kontekście rozmowy | sprawdź, czy źródło z aktualizacją jest w notatniku |
+| `RateLimitError` | za dużo pytań | poczekaj; komunikat dla użytkownika obsługuje tę ścieżkę |
+| **wieczne „myśli…" bez odpowiedzi** | patrz niżej — trzy różne przyczyny | `daemon.py log`, potem tabela niżej |
+| bot online, `/test` mówi „gotowy”, a pytania nie działają | `/test` nie potrafi tego wykryć — sprawdza `from_storage`, nie odpowiedź | zapytaj realnie; zob. `/ai-dan` |
+
+## Wieczne „myśli…" — trzy przyczyny, jedna procedura
+
+Objaw identyczny, przyczyny zupełnie różne. **Nie zgaduj — czytaj log.**
+
+| Co w logu | Co to znaczy | Co zrobić |
+|---|---|---|
+| `200 OK` na `GenerateFreeFormStreamed`, potem cisza | `chat_timeout` to limit **pojedynczego odczytu**, strumień nie domknął | poczekaj na `BUDZET_ZAPYTANIA_S` (240 s) — bot sam powie, że nie zdążył |
+| `RotateCookies 200 OK` leci, zapytania brak | pętla żyje, wiszący await jest **poza** terminem | szukaj uciętego handlera (`global` bez wcięcia w środku funkcji) |
+| brak jakiegokolwiek wpisu po `Zsynchronic` | handler nie doszedł do zapytania | `daemon.py status`, potem deploy z testami |
+
+Zabezpieczenie istnieje od 30.09: `BUDZET_ZAPYTANIA_S` w `.env`. Po przekroczeniu
+użytkownik dostaje konkretny komunikat, a w logu pojawia się
+`Zapytanie przekroczylo budzet`. To **nie** jest ani limit kwoty, ani wygasanie
+sesji — zdarzenie nie trafia do licznika.
+
+## Licznik limitów
+
+```bash
+python tools/limits_probe.py --sprawdz   # sesja żyje + stan licznika
+python tools/limits_probe.py --zasil     # wczytaj istniejące artefakty (koszt 0)
+python tools/limits_probe.py --odczyt    # sam raport
+python tools/limits_probe.py --probe audio   # JEDNO generowanie (kosztuje limit)
+```
+
+Licznik **nie zgaduje**. Raport pokazuje granice, nie dokładne liczby: limit +
+pierwszy sukces po nim daje górną granicę okna resetu, liczba sukcesów
+między limitami daje dolną granicę limitu. Bez pary limit → sukces raport oddaje
+`znane: nie` zamiast liczby.
+
+Stan zdarzeń jest w `limits.json` (`0600`, runtime, nie w repo).
 
 ## Sprawdzenie, co jest w notatniku
 
