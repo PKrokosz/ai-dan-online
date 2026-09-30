@@ -211,6 +211,15 @@ ZLAMANIA_LIMITS = [
         "test_uszkodzony_plik_nie_wywraca_licznika",
     ),
     (
+        "regresja: odwiezanie mnozy logowania (96 rund = 96 zdarzen)",
+        b"            ostatnie_logowanie = max((w.czas for w in self.logowania), default=None)\n"
+        b"            if ostatnie_logowanie is not None and (\n"
+        b"                    ostatnie_wygasanie is None or ostatnie_logowanie > ostatnie_wygasanie):\n"
+        b"                return False  # ta sesja juz jest odnotowana jako zywa",
+        b"            if False:\n                return False",
+        "test_powtorzone_odwiezenie_to_jedno_logowanie",
+    ),
+    (
         "regresja: zadanie w toku zapisywane jako awaria",
         b'    return str(getattr(status, "status", "")) in ("pending", "in_progress")',
         b"    return False",

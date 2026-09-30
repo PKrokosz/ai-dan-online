@@ -212,6 +212,52 @@ class TestZycieSesji(unittest.TestCase):
         self.assertEqual(r["zycie_godziny"], 3.0)
 
 
+class TestOdwiezanieNieZasmieczaLicznika(unittest.TestCase):
+    """Petla odwiezania co 15 min nie moze mnozyc logowan.
+
+    Wykryte testem integracyjnym 30.09: 3 rundy odwiezenia zapisaly
+    3 "logowania". Przy 96 rundach dziennie licznik pokazalby 96 logowan
+    z jednego, a zycie sesji liczyloby sie od ostatniej rundy — czyli
+    od czegos, co nie jest poczatkiem sesji.
+    """
+
+    def setUp(self):
+        self.katalog = tempfile.mkdtemp()
+        self.plik = Path(self.katalog) / "limits.json"
+        self.licznik = LicznikLimitow(self.plik)
+
+    def test_powtorzone_odwiezenie_to_jedno_logowanie(self):
+        zapisane = [self.licznik.rejestruj_sesje_zywa(czas=1000.0) for _ in range(5)]
+        self.assertTrue(zapisane[0], "pierwsze musi zapisac")
+        self.assertFalse(any(zapisane[1:]), "kolejne nie moga zapisywac")
+        self.assertEqual(self.licznik.raport_sesji()["logowania"], 1)
+
+    def test_po_wygasnieciu_nowe_logowanie_to_nowe_zdarzenie(self):
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 2 * H)
+        self.assertTrue(self.licznik.rejestruj_sesje_zywa(czas=1000.0 + 3 * H))
+        self.assertEqual(self.licznik.raport_sesji()["logowania"], 2)
+        self.assertEqual(self.licznik.raport_sesji()["wygasania"], 1)
+
+    def test_zycie_nie_liczy_sie_od_ostatniej_rundy(self):
+        # 96 odwiezen w ciagu jednej sesji — zycie musi zostac liczone
+        # od pierwszego logowania, nie od ostatniego
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        for i in range(1, 97):
+            self.licznik.rejestruj_sesje_zywa(czas=1000.0 + i * 900.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 2 * H)
+        r = self.licznik.raport_sesji()
+        self.assertEqual(r["logowania"], 1)
+        self.assertEqual(r["zycie_godziny"], 2.0)
+
+    def test_przezycie_przeciezenia_czasu(self):
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        nowy = LicznikLimitow(self.plik)
+        self.assertFalse(nowy.rejestruj_sesje_zywa(czas=2000.0),
+                         "po reloadzie tez nie moze dopisac")
+        self.assertEqual(nowy.raport_sesji()["logowania"], 1)
+
+
 class TestLiczenie(unittest.TestCase):
     def setUp(self):
         self.katalog = tempfile.mkdtemp()

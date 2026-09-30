@@ -39,3 +39,10 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Petla odswiezenia sesji — stan runtime
+refresh.log
+refresh.pid
+
+# Wyjscie pobierania artefaktow (probe)
+probe-out/

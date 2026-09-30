@@ -365,17 +365,30 @@ class LicznikLimitow:
         wcześniejsze = [w.czas for w in self.logowania if w.czas <= czas]
         return max(wcześniejsze) if wcześniejsze else None
 
-    def rejestruj_sesje_zywa(self, *, czas: float | None = None) -> None:
+    def rejestruj_sesje_zywa(self, *, czas: float | None = None) -> bool:
         """Zapisuje fakt, ze uwierzytelnienie sie powiodlo (token pobrany).
 
-        Bez tego zdarzenia nie da sie policzyc zycia sesji: roznica miedzy
-        dwoma wykryciami nie jest dlugoscia sesji, tylko odstepem miedzy
-        podejrzeniami o tej samej martwej sesji.
+        Zwraca True tylko gdy ZAPISANO nowe zdarzenie. Powtarzajace sie rundy
+        odwiezenia nie sa nowymi logowaniami — sa tym samym logowaniem, o ktorym
+        wiadomo. Bez tego petla co 15 min zapisalaby 96 "logowan" dziennie
+        z jednego logowania, a zycie sesji liczyloby sie od ostatniej rundy,
+        czyli od czegos, co nie jest poczatkiem sesji.
+
+        Zwraca False, gdy sesja byla juz odnotowana jako zywa — czyli gdy
+        ostatnie zdarzenie to wygasniecie LUB brak ostatniego zdarzenia.
         """
+        kiedy = czas if czas is not None else time.time()
         with self._blokada:
-            self.logowania.append(Wydarzenie(
-                czas=czas if czas is not None else time.time(), status="ok"))
+            # Ostatnie ZDARZENIE sesji: wygaśnięcie albo logowanie, co jest
+            # nowsze. Jeśli nowsze jest logowanie, ta sesja jest już zapisana.
+            ostatnie_wygasanie = max((w.czas for w in self.wygasania), default=None)
+            ostatnie_logowanie = max((w.czas for w in self.logowania), default=None)
+            if ostatnie_logowanie is not None and (
+                    ostatnie_wygasanie is None or ostatnie_logowanie > ostatnie_wygasanie):
+                return False  # ta sesja juz jest odnotowana jako zywa
+            self.logowania.append(Wydarzenie(czas=kiedy, status="ok"))
             self._zapisz()
+            return True
 
     def rejestruj_wygasniecie_sesji(
         self, wyjatek: BaseException, *, czas: float | None = None
