@@ -72,8 +72,19 @@ infographic           3       0        0          3         -  nie
 5 sukcesów z istniejących artefaktów, **0 zmierzonych limitów**. Okno resetu
 nieznane — brak pary.
 
-Trzy infografiki mają **identyczną sekundę** utworzenia, co sugeruje generowanie
-hurtem. Pierwsza wskazówka o charakterze limitów, jaka w ogóle mamy.
+**Korekta:** pierwotnie pisałem tu, że „trzy infografiki mają identyczną sekundę,
+co sugeruje generowanie hurtem". To było **błędne odczytanie własnego wyjścia** —
+`--zasil` wypisuje `created_at` obcięty do sekundy, przez co trzy różne
+artykuły wyglądały na jednoczesne. Pełne daty:
+
+```
+Mechanika tworzenia magii żywiołów   2026-07-31 15:09:51
+Przewodnik po awansach w Kolonii      2026-07-31 10:13:42
+Anatomia magii: Przewodnik po zwojach 2026-07-30 15:20:01
+```
+
+To dwa różne dni i trzy różne godziny — **nie** generowanie hurtem. Wniosek
+był zgadnięciem, bo nikt nie sprawdził danych przed ich interpretacją.
 
 ## Trzy błędy, które tu naprawiłem
 
