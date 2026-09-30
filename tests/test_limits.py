@@ -27,6 +27,14 @@ class AtrapaStatus:
         self.error = error
 
 
+def BLED_SESJI() -> ValueError:
+    """Realny komunikat biblioteki — rozpoznawany przez `czy_to_wygasniecie_sesji`."""
+    return ValueError(
+        "Authentication expired or invalid. Redirected to: https://accounts.google.com/x"
+        " Run 'notebooklm login' to re-authenticate."
+    )
+
+
 class TestRozpoznawanieLimitu(unittest.TestCase):
     def test_kod_strukturalny_rozpoznany(self):
         self.assertTrue(czy_to_limit(AtrapaStatus("failed", error_code="USER_DISPLAYABLE_ERROR")))
@@ -114,6 +122,94 @@ class TestOczekiwanieWyniku(unittest.TestCase):
         for stan in ("completed", "failed", "removed", "not_found"):
             with self.subTest(stan=stan):
                 self.assertFalse(czy_wymaga_oczekiwania(AtrapaStatus(stan)))
+
+
+class TestZycieSesji(unittest.TestCase):
+    """Zycie sesji liczone WYLACZNIE z par logowanie -> wygasniecie.
+
+    Wczesniejsza wersja liczyla roznice miedzy kolejnymi wykryciami. Dla
+    jednej martwej sesji zgloszonej dwa razy raportowala "zycie 0,58 h",
+    co wygladalo jak wiedza o czestotliwosci wygasania, a bylo odstepem
+    miedzy podejrzeniami.
+    """
+
+    def setUp(self):
+        self.katalog = tempfile.mkdtemp()
+        self.plik = Path(self.katalog) / "limits.json"
+        self.licznik = LicznikLimitow(self.plik)
+
+    def test_bez_logowania_nie_ma_zycia(self):
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1268.0)
+        r = self.licznik.raport_sesji()
+        self.assertIsNone(r["zycie_godziny"], "zycie policzone bez logowania")
+        self.assertIn("brak pary", r["zycie_powod"])
+
+    def test_powtorne_wykrycie_nie_jest_wygasnieciem(self):
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1268.0)
+        r = self.licznik.raport_sesji()
+        self.assertEqual(r["wykrycia"], 2)
+        # pierwsze wykrycie to prawdziwe wygasniecie (nieznamy tylko poczatku),
+        # drugie to ta sama martwa sesja zgloszona ponownie
+        self.assertEqual(r["wygasania"], 1)
+        self.assertEqual(r["powtorne_wykrycia"], 1)
+        self.assertIsNone(r["zycie_godziny"])
+
+    def test_zycie_z_pary_logowanie_wygasniecie(self):
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 4 * H)
+        r = self.licznik.raport_sesji()
+        self.assertEqual(r["wygasania"], 1)
+        self.assertEqual(r["zycie_godziny"], 4.0)
+        self.assertIn("mediana", r["zycie_powod"])
+
+    def test_drugie_wygasniecie_domyka_powtorne_wykrycie(self):
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 4 * H)
+        # ta sama martwa sesja zgloszona drugi raz — po restarcie daemona
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 4 * H + 600)
+        self.assertEqual(self.licznik.raport_sesji()["powtorne_wykrycia"], 1)
+        # nowe logowanie i kolejne wygasniecie — to juz kolejna sesja
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0 + 6 * H)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 10 * H)
+        r = self.licznik.raport_sesji()
+        self.assertEqual(r["wygasania"], 2)
+        self.assertEqual(r["zycie_godziny"], 4.0)  # mediana z 4 h i 4 h
+
+    def test_zywa_sesja_nie_jest_wygasnieciem(self):
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        r = self.licznik.raport_sesji()
+        self.assertIsNone(r["zycie_godziny"])
+        self.assertEqual(r["wygasania"], 0)
+        self.assertIn("jeszcze zyje", r["zycie_powod"])
+
+    def test_stary_plik_z_plaska_lista_nie_daje_zycia(self):
+        self.plik.write_text(json.dumps({
+            "wersja": 1,
+            "sesje": [{"czas": 1000.0, "status": "expired"},
+                      {"czas": 1268.0, "status": "expired"}],
+            "typy": {},
+        }), encoding="utf-8")
+        licznik = LicznikLimitow(self.plik)
+        r = licznik.raport_sesji()
+        self.assertIsNone(r["zycie_godziny"], "stary plik bez logowan dal zycie")
+        self.assertEqual(r["wykrycia"], 2)
+        # migracja NIE wymysla wygasan: wpis sprzed wdrozenia mogl byc czymkolwiek
+        self.assertEqual(r["wygasania"], 0)
+
+    def test_sygnatura_nie_sesji_nie_dotyka_sesji(self):
+        self.assertFalse(self.licznik.rejestruj_wygasniecie_sesji(ValueError("coś innego")))
+        self.assertEqual(self.licznik.raport_sesji()["wykrycia"], 0)
+
+    def test_przezycie_po_reloadzie_pliku(self):
+        self.licznik.rejestruj_sesje_zywa(czas=1000.0)
+        self.licznik.rejestruj_wygasniecie_sesji(BLED_SESJI(), czas=1000.0 + 3 * H)
+        wczytany = LicznikLimitow(self.plik)
+        r = wczytany.raport_sesji()
+        self.assertEqual(r["logowania"], 1)
+        self.assertEqual(r["wygasania"], 1)
+        self.assertEqual(r["zycie_godziny"], 3.0)
 
 
 class TestLiczenie(unittest.TestCase):
@@ -225,25 +321,27 @@ class TestWygasanieSesji(unittest.TestCase):
             ValueError("Authentication expired or invalid."), czas=1000.0))
         for typ in ("audio", "video", "quiz"):
             self.assertEqual(self.licznik.raport(typ)["limity"], 0)
-        self.assertEqual(self.licznik.raport_sesji()["wygasniecia"], 1)
+        self.assertEqual(self.licznik.raport_sesji()["wykrycia"], 1)
 
     def test_nie_zapisuje_czego_nie_dotyczy_sesji(self):
         self.assertFalse(self.licznik.rejestruj_wygasniecie_sesji(
             ValueError("quota exceeded"), czas=1000.0))
-        self.assertEqual(self.licznik.raport_sesji()["wygasniecia"], 0)
+        self.assertEqual(self.licznik.raport_sesji()["wykrycia"], 0)
 
-    def test_zycie_sesji_liczone_dopiero_drugiego_wygasania(self):
+    def test_zycie_nie_liczy_sie_z_dwoch_wykryc(self):
+        # Dwa wykrycia tej samej martwej sesji to nie dwie sesje. Wczesniejsza
+        # wersja raportowala tu "zycie 5 h", co bylo odstepem miedzy nimi.
         self.licznik.rejestruj_wygasniecie_sesji(ValueError("Authentication expired"), czas=0.0)
-        r = self.licznik.raport_sesji()
-        self.assertEqual(r["wygasniecia"], 1)
-        self.assertIsNone(r["zycie_godziny"])
         self.licznik.rejestruj_wygasniecie_sesji(ValueError("Authentication expired"), czas=5 * H)
-        self.assertEqual(self.licznik.raport_sesji()["zycie_godziny"], 5.0)
+        r = self.licznik.raport_sesji()
+        self.assertEqual(r["wykrycia"], 2)
+        self.assertEqual(r["powtorne_wykrycia"], 1)
+        self.assertIsNone(r["zycie_godziny"])
 
     def test_przetrwaja_restart(self):
         self.licznik.rejestruj_wygasniecie_sesji(ValueError("Authentication expired"), czas=1000.0)
         nowy = LicznikLimitow(self.licznik.sciezka)
-        self.assertEqual(nowy.raport_sesji()["wygasniecia"], 1)
+        self.assertEqual(nowy.raport_sesji()["wykrycia"], 1)
 
 
 class TestTrwalosc(unittest.TestCase):

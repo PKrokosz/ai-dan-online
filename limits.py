@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import tempfile
 import threading
 import time
@@ -79,6 +80,13 @@ def czy_wymaga_oczekiwania(status: Any) -> bool:
     toku jako awarie.
     """
     return str(getattr(status, "status", "")) in ("pending", "in_progress")
+
+
+def _iso(czas: float | None) -> str | None:
+    """Znacznik czasu w UTC — raport ma byc porownywalny niezaleznie od strefy."""
+    if czas is None:
+        return None
+    return datetime.fromtimestamp(czas, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def czy_to_limit(status: Any) -> bool:
@@ -164,7 +172,10 @@ class LicznikLimitow:
         self._typy: dict[str, StanTypu] = {t: StanTypu(t) for t in TYPY}
         # wygasania sesji nie sa przypisane do typu artefaktu: padaja wczesniej,
         # niz w ogole powstaje zadanie, i dotycza calego klienta
-        self.sesje: list[Wydarzenie] = []
+        self.logowania: list[Wydarzenie] = []
+        self.wykrycia: list[Wydarzenie] = []
+        self.wygasania: list[Wydarzenie] = []
+        self.powtorne_wykrycia = 0
         self._wczytaj()
 
     # --- zapis / odczyt -------------------------------------------------
@@ -190,17 +201,58 @@ class LicznikLimitow:
                         cel.append(Wydarzenie(czas=float(w["czas"]), status=str(w.get("status", ""))))
                     except (KeyError, TypeError, ValueError):
                         continue
-        for w in surowe.get("sesje") or []:
+        self._wczytaj_sesje(surowe)
+
+    def _wczytaj_sesje(self, surowe: dict[str, Any]) -> None:
+        """Sesje w nowym ukladzie (logowania/wykrycia/wygasania) albo starym.
+
+        Stary uklad to plaska lista zdarzen bez informacji, czy to logowanie
+        czy wykrycie. Wszystkie trafiaja do `wykrycia`, a `wygasania` zostaje
+        puste — dzieki temu zycie sesji nie jest liczone z czegokolwiek,
+        czego nie znamy.
+        """
+        sekcja = surowe.get("sesje")
+        if isinstance(sekcja, list):
+            for w in sekcja:
+                try:
+                    self.wykrycia.append(
+                        Wydarzenie(czas=float(w["czas"]), status=str(w.get("status", "")))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.powtorne_wykrycia = 0
+            return
+        if not isinstance(sekcja, dict):
+            return
+        for klucz, cel in (("logowania", self.logowania), ("wykrycia", self.wykrycia)):
+            for w in sekcja.get(klucz) or []:
+                try:
+                    cel.append(
+                        Wydarzenie(czas=float(w["czas"]), status=str(w.get("status", "")))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+        for w in sekcja.get("wygasania") or []:
             try:
-                self.sesje.append(Wydarzenie(czas=float(w["czas"]), status=str(w.get("status", ""))))
+                self.wygasania.append(Wydarzenie(
+                    czas=float(w["czas"]), status=str(w.get("status", ""))))
             except (KeyError, TypeError, ValueError):
                 continue
+        self.powtorne_wykrycia = int(sekcja.get("powtorne_wykrycia", 0) or 0)
 
     def _zapisz(self) -> None:
         dane = {
             "wersja": WERSJA,
             "zapisano": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sesje": [{"czas": w.czas, "status": w.status} for w in self.sesje],
+            "sesje": {
+                "logowania": [{"czas": w.czas, "status": w.status} for w in self.logowania],
+                "wykrycia": [{"czas": w.czas, "status": w.status} for w in self.wykrycia],
+                "wygasania": [
+                    {"czas": w.czas, "status": w.status, "login": self._login_dla(w.czas)}
+                    for w in self.wygasania
+                ],
+                "powtorne_wykrycia": self.powtorne_wykrycia,
+            },
             "typy": {
                 nazwa: {
                     "sukcesy": [{"czas": w.czas, "status": w.status} for w in stan.sukcesy],
@@ -308,45 +360,101 @@ class LicznikLimitow:
     def wszystkie_raporty(self) -> list[dict[str, Any]]:
         return [self.raport(t) for t in sorted(self._typy)]
 
+    def _login_dla(self, czas: float) -> float | None:
+        """Najpozniejsze logowanie, ktore nastapilo nie pozniej niz `czas`."""
+        wcześniejsze = [w.czas for w in self.logowania if w.czas <= czas]
+        return max(wcześniejsze) if wcześniejsze else None
+
+    def rejestruj_sesje_zywa(self, *, czas: float | None = None) -> None:
+        """Zapisuje fakt, ze uwierzytelnienie sie powiodlo (token pobrany).
+
+        Bez tego zdarzenia nie da sie policzyc zycia sesji: roznica miedzy
+        dwoma wykryciami nie jest dlugoscia sesji, tylko odstepem miedzy
+        podejrzeniami o tej samej martwej sesji.
+        """
+        with self._blokada:
+            self.logowania.append(Wydarzenie(
+                czas=czas if czas is not None else time.time(), status="ok"))
+            self._zapisz()
+
     def rejestruj_wygasniecie_sesji(
         self, wyjatek: BaseException, *, czas: float | None = None
     ) -> bool:
-        """Zapisuje wygasniecie sesji. Zwraca True, gdy to faktycznie sesja.
+        """Zapisuje wykrycie martwej sesji. Zwraca True, gdy to faktycznie sesja.
 
-        Osobne od limitow kwoty z dwóch powodow: pada pozna wczesniej (przy
+        Rozroznia dwa zdarzenia, ktore wczesniej byly jednym:
+          * `wygasanie` — znamy udane logowanie, ktorego nikt nie zamknal,
+          * `powtorne wykrycie` — ta sama martwa sesja zgloszona drugi raz
+            (np. po restarcie daemona). Nie jest nowym wygasnieciem i nie
+            moze wydluzacz zycia sesji.
+
+        Osobne od limitow kwoty z dwoch powodow: pada pozna wczesniej (przy
         budowie klienta, nie przy generowaniu) i resetuje sie w skali
         tygodni, a nie godzin. W jednym worku wyznaczanie okna byloby smieciowe.
         """
         if not czy_to_wygasniecie_sesji(wyjatek):
             return False
+        kiedy = czas if czas is not None else time.time()
         with self._blokada:
-            self.sesje.append(Wydarzenie(
-                czas=czas if czas is not None else time.time(),
-                status=str(wyjatek)[:200],
-            ))
+            self.wykrycia.append(Wydarzenie(czas=kiedy, status=str(wyjatek)[:200]))
+            ostatnie_wygasanie = max((w.czas for w in self.wygasania), default=None)
+            if ostatnie_wygasanie is None:
+                # Pierwsze wykrycie w zapisanej historii: to prawdziwe wygasniecie,
+                # po prostu nie znamy kiedy ta sesja sie zaczela (mogla zaczac sie
+                # zanim w ogole zapisalismy). Zapisujemy ja BEZ znanego poczatku,
+                # dzieki czemu nie wydluza zycia, ale nie ginie z historii.
+                self.wygasania.append(Wydarzenie(czas=kiedy, status=str(wyjatek)[:200]))
+            elif any(w.czas > ostatnie_wygasanie for w in self.logowania):
+                # Od ostatniego wygasniecia bylo nowe logowanie — to kolejna sesja.
+                self.wygasania.append(Wydarzenie(czas=kiedy, status=str(wyjatek)[:200]))
+            else:
+                # Ta sama martwa sesja zgloszona ponownie, np. po restarcie daemona.
+                self.powtorne_wykrycia += 1
             self._zapisz()
         return True
 
     def raport_sesji(self) -> dict[str, Any]:
-        """Historia wygasan. Dlugosc zycia sesji liczona miedzy nimi."""
-        if not self.sesje:
-            return {"wygasniecia": 0, "ostatnie": None, "zycie_godziny": None}
-        uporzadkowane = sorted(self.sesje, key=lambda w: w.czas)
-        ostatnie = uporzadkowane[-1]
-        zycie = None
-        if len(uporzadkowane) >= 2:
-            roznica = ostatnie.czas - uporzadkowane[-2].czas
-            zycie = round(roznica / 3600.0, 2)
-        return {
-            "wygasniecia": len(self.sesje),
-            "ostatnie": ostatnie.iso(),
-            "ostatni_tekst": ostatnie.status[:160],
-            "zycie_godziny": zycie,
+        """Stan sesji Google. Zycie liczone WYLACZNIE z par logowanie->wygasanie.
+
+        Bez pary zwracamy `zycie_godziny = None` i wypisujemy powod. Wczesniejsza
+        wersja liczyla roznice miedzy kolejnymi wykryciami i raportowala
+        "zycie 0,58 h" dla jednej martwej sesji zgloszonej dwa razy.
+        """
+        teraz = time.time()
+        ostatnie_wykrycie = max((w.czas for w in self.wykrycia), default=None)
+        ostatnie_wygasanie = max((w.czas for w in self.wygasania), default=None)
+        ostatnie_logowanie = max((w.czas for w in self.logowania), default=None)
+        zycia = sorted(
+            w.czas - self._login_dla(w.czas)
+            for w in self.wygasania
+            if self._login_dla(w.czas) is not None
+        )
+        raport: dict[str, Any] = {
+            "logowania": len(self.logowania),
+            "wykrycia": len(self.wykrycia),
+            "wygasania": len(self.wygasania),
+            "powtorne_wykrycia": self.powtorne_wykrycia,
+            "ostatnie_logowanie": _iso(ostatnie_logowanie),
+            "ostatnie_wygasniecie": _iso(ostatnie_wygasanie),
+            "ostatnie_wykrycie": _iso(ostatnie_wykrycie),
+            "sekundy_od_wykrycia": (round(teraz - ostatnie_wykrycie, 1)
+                                    if ostatnie_wykrycie else None),
+            "zycie_godziny": None,
+            "zycie_powod": "brak pary logowanie -> wygasniecie",
         }
+        if zycia:
+            raport["zycie_godziny"] = round(statistics.median(zycia) / 3600.0, 2)
+            raport["zycie_powod"] = f"mediana z {len(zycia)} zamknietej sesji"
+        elif self.logowania and not self.wygasania:
+            raport["zycie_powod"] = "sesja od ostatniego logowania jeszcze zyje"
+        return raport
 
     def reset(self) -> None:
         """Czysci zdarzenia. Do badanego okna — nie do dzialajacego boota."""
         with self._blokada:
             self._typy = {t: StanTypu(t) for t in TYPY}
-            self.sesje = []
+            self.logowania = []
+            self.wykrycia = []
+            self.wygasania = []
+            self.powtorne_wykrycia = 0
             self._zapisz()

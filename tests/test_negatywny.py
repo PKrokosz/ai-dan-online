@@ -210,18 +210,28 @@ ZLAMANIA_LIMITS = [
         "test_awaria_zapisana_dokladnie_raz",
     ),
     (
+        "regresja: zycie sesji liczone z odstepu miedzy wykryciami",
+        b"            w.czas - self._login_dla(w.czas)\n"
+        b"            for w in self.wygasania\n"
+        b"            if self._login_dla(w.czas) is not None",
+        b"            w.czas - self.wykrycia[-2].czas\n"
+        b"            for w in self.wygasania[-1:]\n"
+        b"            if len(self.wykrycia) >= 2",
+        "test_bez_logowania_nie_ma_zycia",
+    ),
+    (
+        "regresja: powtorne wykrycie liczone jako nowe wygasniecie",
+        b"                self.powtorne_wykrycia += 1",
+        b"                self.wygasania.append(Wydarzenie(czas=kiedy, status=\"x\"))",
+        "test_powtorne_wykrycie_nie_jest_wygasnieciem",
+    ),
+    (
         "regresja: wygasanie sesji mylone z limitem kwoty",
         b"        if not czy_to_wygasniecie_sesji(wyjatek):\n            return False",
         b"        if False:\n            return False",
         "test_limit_kwoty_to_nie_wygasanie_sesji",
     ),
-    (
-        "regresja: zycie sesji zgadywane z jednego zdarzenia",
-        b"        if len(uporzadkowane) >= 2:",
-        b"        if len(uporzadkowane) >= 1:",
-        "test_zycie_sesji_liczone_dopiero_drugiego_wygasania",
-    ),
-]
+    ]
 
 print("=== stan przed zlamaniami ===")
 przed = BOT.read_bytes()

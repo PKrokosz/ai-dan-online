@@ -168,8 +168,14 @@ async def sprawdz_sesje(licznik: LicznikLimitow) -> int:
 
     try:
         print("sesja zyje — klient zbudowany")
+        # Zapis udanego uwierzytelnienia. Bez tego zdarzenia zycia sesji nie da
+        # sie policzyc: roznica miedzy dwoma wykryciami to odstep miedzy
+        # podejrzeniami, nie dlugosc sesji.
+        licznik.rejestruj_sesje_zywa()
         r = licznik.raport_sesji()
-        print(f"  wygasania odnotowane: {r['wygasniecia']}")
+        print(f"  logowania={r['logowania']} wykrycia={r['wykrycia']} "
+              f"wygasania={r['wygasania']} powtorne={r['powtorne_wykrycia']}")
+        print(f"  zycie sesji: {r['zycie_godziny']} h ({r['zycie_powod']})")
         return 0
     finally:
         await klient.__aexit__(None, None, None)
@@ -187,9 +193,15 @@ def odczyt(licznik: LicznikLimitow) -> int:
     znane = [r for r in licznik.wszystkie_raporty() if r["znasz_juz_okno"]]
     sesja = licznik.raport_sesji()
     print()
-    print(f"sesja Google: wygasniecia={sesja['wygasniecia']}"
-          f" ostatnie={sesja['ostatnie'] or '-'}"
-          f" zycie={sesja['zycie_godziny'] if sesja['zycie_godziny'] is not None else '-'}")
+    print(f"sesja Google: logowania={sesja['logowania']} "
+          f"wykrycia={sesja['wykrycia']} wygasania={sesja['wygasania']} "
+          f"powtorne={sesja['powtorne_wykrycia']}")
+    print(f"  ostatnie logowanie: {sesja['ostatnie_logowanie'] or '-'} | "
+          f"ostatnie wygasniecie: {sesja['ostatnie_wygasniecie'] or '-'} | "
+          f"od ostatniego wykrycia: {sesja['sekundy_od_wykrycia']} s")
+    print(f"  zycie sesji: "
+          f"{sesja['zycie_godziny'] if sesja['zycie_godziny'] is not None else '-'} h "
+          f"({sesja['zycie_powod']})")
     if znane:
         print("Okna resetu (gorne granice, nie zgadywki):")
         for r in znane:
