@@ -1,0 +1,18 @@
+# Wymuszenie LF w repo. Bez tego git na Windows zamienia LF na CRLF przy
+# checkout, a bramki negatywne porownuja pliki bajt w bajt — wynik zalezalby
+# od ustawien lokalnych, nie od kodu.
+* text=auto eol=lf
+
+*.py text eol=lf
+*.mjs text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.example text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# binarnie — nie ruszac
+*.png binary
+*.jpg binary
+*.webp binary
+*.pdf binary

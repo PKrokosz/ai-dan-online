@@ -1,0 +1,37 @@
+# Sekrety. Nigdy nie commituj.
+.env
+.env.*
+!.env.example
+*.env
+
+# Token bota trzymany osobno w %TEMP% (Windows) lub /tmp (Linux)
+*token*.txt
+notebooklm-bot-token.txt
+
+# Profil logowania NotebookLM — ciasteczka Google, wartosci sesji
+storage_state.json
+*storage_state*.json
+cookies.json
+chrome_profile/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Kopie zostawiane przez test negatywny (powinny znikac, ale bywaja,
+# gdy test zostanie przerwany w trakcie)
+bot.py.nagatyw
+
+# Systemowe / edytory
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

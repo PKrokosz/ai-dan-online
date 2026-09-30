@@ -1,0 +1,28 @@
+# Bot Discord dla notatnika NotebookLM.
+#
+# Wersje sa przypiate celowo: API notebooklm-py zmienia sie miedzy
+# wydaniami, a bot uzywa wewnetrznych nazw (`client.chat.ask`,
+# `AskResult.references`), ktore sa szczegolami implementacji, nie
+# publicznym API. Dlatego aktualizacja to zmiana swiadoma, z canary,
+# a nie `pip install -U`.
+#
+# Sprawdzone dzialanie na:
+#   Python 3.14.5 / 3.12
+#   discord.py 2.7.1
+#   notebooklm-py 0.7.2
+
+discord.py==2.7.1
+notebooklm-py==0.7.2
+
+# Opcjonalne: import ciasteczek z zainstalowanej przegladarki
+# (`notebooklm login --browser-cookies chrome`). Wymaga kompilacji Rust
+# i na Pythonie 3.14 nie ma gotowego wheela — patrz docs/NOTEBOOKLM.md.
+# rookiepy==0.5.6
+
+# Opcjonalne: `markdownify` dla get_fulltext(output_format="markdown")
+# notebooklm-py[markdown]
+
+# Opcjonalne: Discord voice. Bot nie uzywa glosu, ale biblioteka o tym
+# ostrzega przy starcie, wiec bez tego log startuje dwoma WARNINGami.
+# PyNaCl==1.5.0
+# davey==0.1.1
