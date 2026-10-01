@@ -33,12 +33,22 @@ DOMENY_OK = (
 )
 
 
+def katalog_bazowy() -> Path:
+    """Katalog uzytkownika.
+
+    `USERPROFILE` istnieje tylko na Windows, a `KeyError: 'USERPROFILE'` dostawalismy
+    przy uruchomieniu testow na serwerze. `Path.home()` dziala wszedzie, a na
+    Windows zwraca to samo — wiec jedna sciezka zamiast dwoch.
+    """
+    return Path(os.environ.get("USERPROFILE") or Path.home())
+
+
 def katalog_profilu() -> Path:
     """Katalog profilu (`…/profiles/default`). Nadpisalny przez NOTEBOOKLM_HOME."""
     baza = os.environ.get("NOTEBOOKLM_HOME")
     if baza:
         return Path(baza)
-    return Path(os.environ["USERPROFILE"]) / ".notebooklm" / "profiles" / "default"
+    return katalog_bazowy() / ".notebooklm" / "profiles" / "default"
 
 
 def sciezka_chrome() -> Path:

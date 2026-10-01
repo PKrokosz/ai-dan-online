@@ -39,11 +39,11 @@ import cookies_z_profilu as ciasteczka_mod
 # plik przeznaczony do wgrania na serwer — celowo POZA katalogiem profilu,
 # zeby `notebooklm login` go nie nadpisywal swoim stanem
 def plik_dla_serwera() -> Path:
-    return Path(os.environ["USERPROFILE"]) / ".notebooklm" / "sesja_na_serwer.json"
+    return ciasteczka_mod.katalog_bazowy() / ".notebooklm" / "sesja_na_serwer.json"
 
 
 def znacznik_ostatniej_proby() -> Path:
-    return Path(os.environ["USERPROFILE"]) / ".notebooklm" / "ostatnia_reauth.json"
+    return ciasteczka_mod.katalog_bazowy() / ".notebooklm" / "ostatnia_reauth.json"
 
 
 @contextmanager
@@ -211,7 +211,7 @@ class Dziennik:
 
 
 def main() -> int:
-    dziennik = Dziennik(Path(os.environ["USERPROFILE"]) / ".notebooklm" / "reauth.log")
+    dziennik = Dziennik(ciasteczka_mod.katalog_bazowy() / ".notebooklm" / "reauth.log")
     with dziennik:
         sys.stdout = dziennik  # type: ignore[assignment]
         return _main()
