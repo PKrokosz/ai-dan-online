@@ -32,6 +32,8 @@ MAPA = {
     "limits_probe.py": "tools/limits_probe.py",
     "reauth.py": "tools/reauth.py",
     "cookies_z_profilu.py": "tools/cookies_z_profilu.py",
+    "wgraj_sesje.py": "tools/wgraj_sesje.py",
+    "dziennie_reauth.py": "tools/dziennie_reauth.py",
     "test_uprawnienia.py": "tools/test_uprawnienia.py",
     "test_limits.py": "tests/test_limits.py",
     "test_bot.py": "tests/test_bot.py",
