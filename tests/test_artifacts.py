@@ -1,4 +1,8 @@
 import asyncio
+import json
+import os
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,11 +27,14 @@ class AtrapaKlient:
     def __init__(self, lista=None):
         self.artifacts = self
         self._lista = lista or {}
+        self.wolania = 0          # licznik RPC — sprawdza pamiec podreczna
 
     def list_audio(self, _nb):
+        self.wolania += 1
         return self._lista.get("audio", [])
 
     def list_infographics(self, _nb):
+        self.wolania += 1
         return self._lista.get("infographic", [])
 
 
@@ -229,6 +236,79 @@ class TestPodpowiedzi(unittest.TestCase):
 
     def test_typ_bez_spacji_nie_wywala(self):
         self.assertIn("audio", artifacts.etykieta_autocomplete(self.wpis("a", "audio")))
+
+
+class TestPamiecPodreczna(unittest.IsolatedAsyncioTestCase):
+    """Pobranie listy mierzono 01.10 na 4,2-4,4 s, a limit autocomplete
+    Discorda to 3 s — czyli lista wyboru nigdy sie nie zdazyła. Pamiec
+    podreczna jest tu wymogiem, nie optymalizacja."""
+
+    def setUp(self):
+        self.katalog = tempfile.mkdtemp(prefix="nlm-cache-")
+        self.addCleanup(shutil.rmtree, self.katalog, True)
+        self.stary_home = os.environ.get("NOTEBOOKLM_HOME")
+        self.stary_nb = os.environ.get("NOTEBOOK_ID")
+        os.environ["NOTEBOOKLM_HOME"] = self.katalog
+        os.environ["NOTEBOOK_ID"] = "nb-test"
+        # biblioteka waliduje obecność tych ciasteczek juz przy budowie
+        # klienta HTTP — atrapa musi je miec, inaczej test nie mierzy cache
+        # tylko brak ciasteczek
+        ciasteczka = [{"name": n, "value": "x", "domain": ".google.com",
+                       "path": "/", "expires": 9999999999}
+                      for n in ("SID", "__Secure-1PSIDTS", "HSID", "SSID",
+                                "APISID", "SAPISID")]
+        Path(self.katalog, "storage_state.json").write_text(
+            json.dumps({"cookies": ciasteczka, "origins": []}), encoding="utf-8")
+        artifacts.wyczysc_cache()
+        self.addCleanup(self.przywroc)
+
+    def przywroc(self):
+        artifacts.wyczysc_cache()
+        for k, v in (("NOTEBOOKLM_HOME", self.stary_home), ("NOTEBOOK_ID", self.stary_nb)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    async def test_drugie_pobranie_nie_idzie_do_sieci(self):
+        klient = AtrapaKlient()
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        self.assertEqual(klient.wolania, 1,
+                         "autocomplete odpala sie na kazde klawisze — bez "
+                         "pamieci kazde nacisniecie to 9 RPC-i")
+
+    async def test_cache_wygasa(self):
+        klient = AtrapaKlient()
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=0.0)
+        self.assertEqual(klient.wolania, 2,
+                         "bez ttl kazde wywolanie ma byc swieze")
+
+    async def test_pomiar_i_szybka_sciezka_to_rozne_wpisy(self):
+        klient = AtrapaKlient()
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        await artifacts.zbierz(klient, typy=["audio"], mierz=True, ttl=60.0)
+        self.assertEqual(klient.wolania, 2,
+                         "sciezka z rozmiarem nie moze dostac odpowiedzi "
+                         "bez rozmiarow z cache")
+
+    async def test_wyczyszczenie_wymusza_pobranie(self):
+        klient = AtrapaKlient()
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        artifacts.wyczysc_cache()
+        await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        self.assertEqual(klient.wolania, 2,
+                         "po wygenerowaniu nowy artefakt musi byc widoczny")
+
+    async def test_zwracana_lista_nie_pozwala_na_zapis_do_cache(self):
+        klient = AtrapaKlient()
+        pierwsze = await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        pierwsze.append({"typ": "audio", "id": "wstrzykniete"})
+        drugie = await artifacts.zbierz(klient, typy=["audio"], mierz=False, ttl=60.0)
+        self.assertNotIn("wstrzykniete", [w.get("id") for w in drugie],
+                         "zwracana lista musi byc kopia, inaczej caller "
+                         "zaostrzy stan z pamieci calej aplikacji")
 
 
 if __name__ == "__main__":

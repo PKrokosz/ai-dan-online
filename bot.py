@@ -493,7 +493,7 @@ async def artefakty(interaction: discord.Interaction) -> None:
 
     import artifacts
     try:
-        znalezione = await artifacts.zbierz(_klient_nb)
+        znalezione = await artifacts.zbierz(_klient_nb, ttl=300.0)
     except Exception as exc:  # noqa: BLE001
         log.warning("Artefakty nieodczytane: %s", exc)
         await interaction.followup.send(f"Nie udało się odczytać artefaktów: {exc}"[:400],
@@ -540,7 +540,9 @@ def artifacts_autocomplete(
         if _klient_nb is None:
             return []
         try:
-            wpisy = await artifacts.zbierz(_klient_nb, mierz=False)
+            # `ttl` jest tu nie optymalizacja, tylko wymog: pelne pobranie
+            # mierzono 01.10 na 4,2-4,4 s, a limit Discorda to 3 s
+            wpisy = await artifacts.zbierz(_klient_nb, mierz=False, ttl=90.0)
             wybor = artifacts.podpowiedzi(wpisy)
         except Exception as exc:  # noqa: BLE001
             log.warning("Podpowiedzi nieudane: %s", exc)

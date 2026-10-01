@@ -12,8 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
+
+# pamiec podreczna listy artefaktow: klucz -> {"wpisy": [...], "wiek": monotonic}
+# lista zmienia sie tylko po wygenerowaniu czegos, wiec krotki TTL wystarczy
+_PAMIAT: dict[str, dict[str, Any]] = {}
 
 # Nazwy typow takie, jakich uzytkownik widzi w komendach.
 LISTY: dict[str, str] = {
@@ -134,59 +139,85 @@ async def zmierz(http: Any, url: str) -> int:
     return n
 
 
+async def _jeden_typ(klient: Any, http: Any, nazwa: str, metoda: str,
+                     mierz: bool) -> list[dict[str, Any]]:
+    """Listing jednego typu. Wyjatkiem nie przerywamy reszty typow."""
+    fn = getattr(klient.artifacts, metoda, None)
+    if fn is None:
+        return []
+    try:
+        lista = await fn(os.environ["NOTEBOOK_ID"])
+    except Exception as exc:  # noqa: BLE001 — jeden typ nie zatrzymuje reszty
+        return [{"typ": nazwa, "blad": f"{type(exc).__name__}: {str(exc)[:80]}"}]
+    wyniki: list[dict[str, Any]] = []
+    for a in lista:
+        if not jest_gotowy(a):
+            continue
+        url = url_pliku(a)
+        wpis: dict[str, Any] = {
+            "typ": nazwa,
+            "id": identyfikator(a),
+            "tytul": str(getattr(a, "title", "?"))[:70],
+            "utworzono": str(getattr(a, "created_at", "")),
+        }
+        if url:
+            wpis["url"] = url
+            if mierz:
+                try:
+                    wpis["bajty"] = await zmierz(http, url)
+                    wpis["mb"] = round(wpis["bajty"] / 1048576, 2)
+                    wpis["miesci"] = wpis["bajty"] <= LIMIT_ZALACZNIKA_B
+                except Exception as exc:  # noqa: BLE001
+                    wpis["blad_rozmiaru"] = f"{type(exc).__name__}: {str(exc)[:70]}"
+        wyniki.append(wpis)
+    return wyniki
+
+
 async def zbierz(klient: Any, typy: list[str] | None = None,
-                 mierz: bool = True) -> list[dict[str, Any]]:
+                 mierz: bool = True, ttl: float = 0.0) -> list[dict[str, Any]]:
     """Zwraca gotowe artefakty. Nic nie generuje.
 
-    `mierz=False` pomija pomiar rozmiarow. To nie optymalizacja, tylko wymóg:
-    `/pobierz` ma autocomplete, a ten odpala sie przy kazdym nacisnietym
-    klawiszu. Przy pelnym `mierz` kazde wywolanie zadzialoby przez dziesiatki
-    sekund i sciagalby kazdy plik z serwera Google — czyli uzytkownik wpisujac
-    slowo zobaczylby, jak bot zachodzi mu w Netlife.
+    `ttl > 0` wlacza pamiec podreczna. Zmierzone 01.10: pelne pobranie trwa
+    4,2-4,4 s, a limit autocomplete Discorda to 3 s — czyli lista wyboru nigdy
+    sie nie zdazyła. Dwa powody, oba naprawione:
+
+    1. typy sa pobierane WSPOLNIE (`asyncio.gather`), a nie po kolei — 9
+       sekwencyjnych RPC-i zamienia sie w jeden czas round-tripu
+    2. `ttl` trzyma wynik w pamieci, bo lista zmienia sie tylko wtedy, gdy
+       ktos cos wygeneruje, czyli rzadko
+
+    `mierz=False` pomija rozmiary. To nie optymalizacja, tylko wymóg:
+    autocomplete odpala sie przy kazdym nacisnietym klawiszu i nie musi
+    pobierac kazdego pliku z serwera Google.
     """
+    import asyncio
     import httpx
     from notebooklm._auth import cookies as auth_cookies
 
     do = typy or list(LISTY)
+    klucz = ("mierz" if mierz else "szybko") + ":" + ",".join(do)
+    if ttl > 0:
+        wpam = _PAMIAT.get(klucz)
+        if wpam is not None and (time.monotonic() - wpam["wiek"]) < ttl:
+            return list(wpam["wpisy"])
+
     jar = auth_cookies.build_httpx_cookies_from_storage(
         Path(os.environ["NOTEBOOKLM_HOME"]) / "storage_state.json")
-
-    wyniki: list[dict[str, Any]] = []
     async with httpx.AsyncClient(cookies=jar, timeout=180.0,
                                  follow_redirects=True) as http:
-        for nazwa in do:
-            metoda = LISTY.get(nazwa)
-            if not metoda:
-                continue
-            fn = getattr(klient.artifacts, metoda, None)
-            if fn is None:
-                continue
-            try:
-                lista = await fn(os.environ["NOTEBOOK_ID"])
-            except Exception as exc:  # noqa: BLE001 — jeden typ nie zatrzymuje reszty
-                wyniki.append({"typ": nazwa, "blad": f"{type(exc).__name__}: {str(exc)[:80]}"})
-                continue
-            for a in lista:
-                if not jest_gotowy(a):
-                    continue
-                url = url_pliku(a)
-                wpis: dict[str, Any] = {
-                    "typ": nazwa,
-                    "id": identyfikator(a),
-                    "tytul": str(getattr(a, "title", "?"))[:70],
-                    "utworzono": str(getattr(a, "created_at", "")),
-                }
-                if url:
-                    wpis["url"] = url
-                    if mierz:
-                        try:
-                            wpis["bajty"] = await zmierz(http, url)
-                            wpis["mb"] = round(wpis["bajty"] / 1048576, 2)
-                            wpis["miesci"] = wpis["bajty"] <= LIMIT_ZALACZNIKA_B
-                        except Exception as exc:  # noqa: BLE001
-                            wpis["blad_rozmiaru"] = f"{type(exc).__name__}: {str(exc)[:70]}"
-                wyniki.append(wpis)
-    return wyniki
+        partie = [_jeden_typ(klient, http, nazwa, LISTY[nazwa], mierz)
+                  for nazwa in do if nazwa in LISTY]
+        wyniki = [w for partia in await asyncio.gather(*partie) for w in partia]
+
+    if ttl > 0:
+        _PAMIAT[klucz] = {"wpisy": wyniki, "wiek": time.monotonic()}
+    return list(wyniki)
+
+
+def wyczysc_cache() -> None:
+    """Po wygenerowaniu artefaktu — inaczej nowy nie pojawilby sie w liscie
+    az do wyparcia wpisu z pamieci."""
+    _PAMIAT.clear()
 
 
 def opis(w: dict[str, Any]) -> str:
