@@ -788,6 +788,134 @@ class TestStartZadan(unittest.IsolatedAsyncioTestCase):
                 await zadanie
 
 
+class TestWorkerBezCichegoBledu(unittest.IsolatedAsyncioTestCase):
+    """Błędy, które w produkcji kosztowały zlecenie i dane o limitach.
+
+    01.10, pierwsze realne `/audio`: `artifacts` nie bylo zaimportowane na
+    poziomie modulu (tylko leniwie w komendach), wiec worker wywalil sie na
+    `artifacts.wyczysc_cache()`. Zadanie bylo JUZZ oznaczone jako `gotowe`,
+    plik nigdy nie poszedl, a uzytkownik nie dostal ani pliku, ani slowa.
+    Drugi blad cichy: `_licznik` jest `None` az do wolania pomocnika, a warunek
+    `if _licznik is not None` zamienil to w pominięcie — wygenerowanie zniklo
+    z `limits.json`.
+    """
+
+    def test_artifacts_zaimportowane_na_poziomie_modulu(self):
+        import artifacts as modul_artifacts
+        self.assertIs(bot.artifacts, modul_artifacts,
+                      "worker kolejki wolaja `artifacts.` — import leniwy w "
+                      "komendach nie wystarczy")
+        self.assertIn("artifacts", inspect.getmodule(bot).__dict__)
+
+    def test_worker_nie_pomija_licznika_gdy_jest_none(self):
+        # `if _licznik is not None` zamienial blad w cisze. Teraz worker ma
+        # wolac `_pobierz_licznika()`, ktory go tworzy.
+        #
+        # WAZNE: szukamy w KODZIE, nie w komentarzach. Pierwsza wersja bramki
+        # padla, bo sama opisala zly wzorzec w komentarzu i dopasowala go
+        # do siebie — czyli bramka czytala notatke o kodzie zamiast kodu.
+        zrodlo = inspect.getsource(bot._obsluz_zadanie_audio)
+        kod = "\n".join(l.split("#")[0] for l in zrodlo.splitlines())
+        self.assertNotIn("if _licznik is not None", kod,
+                         "ciche pominięcie zapisu w liczniku")
+        self.assertIn("_pobierz_licznika()", kod)
+
+    def test_temat_jest_przekazywany_do_instructions(self):
+        # `temat` byl zapisywany do kolejki i nigdzie nie uzywany — uzytkownik
+        # dostawal audio z calego notatnika, a my pokazywali mu temat.
+        zrodlo = inspect.getsource(bot._obsluz_zadanie_audio)
+        kod = "\n".join(l.split("#")[0] for l in zrodlo.splitlines())
+        self.assertIn("instructions=temat", kod,
+                      "temat z kolejki musi trafic do `instructions`")
+
+    def test_gotowe_oznaczane_dopiero_po_wyslaniu(self):
+        zrodlo = inspect.getsource(bot._obsluz_zadanie_audio)
+        pozycja_wyslania = zrodlo.index("_wyślij_wynik_audio")
+        pozycja_oznaczenia = zrodlo.index('oznacz(zadanie_id, "gotowe"')
+        self.assertLess(pozycja_wyslania, pozycja_oznaczenia,
+                        "kolejka musi oznaczyc `gotowe` PO dostarczeniu")
+
+    def test_wyslanie_zwraca_czy_sukces(self):
+        import inspect as _i
+        zrodlo = _i.getsource(bot._wyślij_wynik_audio)
+        self.assertIn("-> bool", zrodlo,
+                      "bez wartosci zwracanej kolejka nie wie, czy plik poszedl")
+
+    async def test_blad_przy_wyslaniu_nie_zostawia_stanu_gotowe(self):
+        wywolane: list[str] = []
+        import kolejka as k
+        import generowanie
+
+        def oznacz(_id_z, stan, _wynik=None):
+            wywolane.append(stan)
+
+        with patch.object(k, "oznacz", oznacz), \
+             patch.object(bot, "_wyślij_wynik_audio", _zwraca(False)), \
+             patch.object(bot, "_pobierz_licznika", _atrapa_licznika()), \
+             patch.object(generowanie, "wygeneruj_audio", _atrapa_wyniku()):
+            await bot._obsluz_zadanie_audio(_Dysk(), {
+                "id": "z1", "channel_id": 1, "parametry": {}})
+        self.assertIn("w_toku", wywolane)
+        self.assertIn("nieudane", wywolane,
+                      "plik nie poszedl, a kolejka nadal musi to widziec")
+        self.assertNotIn("gotowe", wywolane,
+                         "`gotowe` bez dostarczenia to klamstwo w kolejce")
+
+    async def test_licznik_jest_wolany_przy_generowaniu(self):
+        # najwazniejszy krok: bez zapisu w limits.json wygenerowanie znika
+        # z danych o limitach, a okno resetu liczy sie na polowie danych
+        zapisane: list[str] = []
+
+        class Licznik:
+            def zapisz_wynik(self, typ, _status):
+                zapisane.append(typ)
+                return False, "sukces"
+
+        import kolejka as k
+        import generowanie
+        with patch.object(k, "oznacz", lambda *_a, **_k: None), \
+             patch.object(bot, "_wyślij_wynik_audio", _zwraca(True)), \
+             patch.object(bot, "_pobierz_licznika", lambda: Licznik()), \
+             patch.object(generowanie, "wygeneruj_audio", _atrapa_wyniku()), \
+             patch.object(bot.artifacts, "wyczysc_cache", lambda: None):
+            await bot._obsluz_zadanie_audio(_Dysk(), {
+                "id": "z1", "channel_id": 1, "parametry": {}})
+        self.assertEqual(zapisane, ["audio"])
+
+
+class _Dysk:
+    async def fetch_channel(self, _i):
+        return _Kanal()
+
+
+class _Kanal:
+    async def send(self, *_a, **_k):
+        return None
+
+
+def _zwraca(wartosc):
+    async def f(*_a, **_k):
+        return wartosc
+    return f
+
+
+def _atrapa_wyniku():
+    class Gotowy:
+        status = "completed"
+        task_id = "t1"
+
+    async def f(*_a, **_k):
+        return {"status": Gotowy(), "sekundy": 12.0}
+    return f
+
+
+def _atrapa_licznika():
+    class L:
+        def zapisz_wynik(self, _typ, _status):
+            return False, "sukces"
+    return lambda: L()
+
+
 if __name__ == "__main__":
     wynik = unittest.main(verbosity=2, exit=False).result
     print("\nKONTRAKT:", "OK" if wynik.wasSuccessful() else "PADL")

@@ -32,6 +32,7 @@ from typing import Any
 
 import unicodedata
 
+import artifacts  # wywolywany tez z workerow kolejki, nie tylko z komend
 import generowanie  # uzywany w dekoratorach @app_commands.choices, czyli przy imporcie
 
 import discord
@@ -493,10 +494,19 @@ async def _obsluz_zadanie_audio(dysk: Any, zadanie: dict[str, Any]) -> None:
         kanal = await dysk.fetch_channel(int(kanal_id))
         await kanal.send(tekst)
 
+    # `temat` z komendy trafial do kolejki, ale NIGDY nie szedl do
+    # `instructions`. Uzytkownik dostawal audio z calego notatnika, a my
+    # raportowaliśmy mu temat, ktorego nie uzyto. Kolejka trzymala go bez
+    # powodu — parametr byl zapisywany, zapomniany, i nikt tego nie zglosil.
+    temat = (parametry.get("temat") or "").strip()
+    if temat:
+        log.info("Kolejka: %s temat -> instructions (%d znakow)", zadanie_id, len(temat))
+
     raport = await generowanie.wygeneruj_audio(
         _klient_nb, NOTEBOOK_ID,
         dlugosc=parametry.get("dlugosc", generowanie.DOMYSLNA_DLUGOSC),
         format_audio=parametry.get("format", generowanie.DOMYSLNY_FORMAT),
+        instructions=temat or None,
         zgloszenie=zglos,
     )
 
@@ -510,18 +520,28 @@ async def _obsluz_zadanie_audio(dysk: Any, zadanie: dict[str, Any]) -> None:
     # Licznik zapisywany PO WYNIKU, nie przy zleceniu: `zapisz_wynik` sam
     # rozroznia sukces, limit i awarie, a limit przychodzi zwykle juz
     # w odpowiedzi na zlecenie.
+    #
+    # `_pobierz_licznika()` zamiast globala: zmienna byla `None`, bo nikt nie
+    # wolal jej pomocnika, a warunek `if _licznik is not None` zamienil to
+    # w CICHĘ pominięcie — wygenerowanie zniklo z danych o limitach, czyli
+    # dokladnie tego, czemu ten krok istnieje. Glosno, nie w ciszy.
     status = raport["status"]
-    if _licznik is not None:
-        to_limit, opis = _licznik.zapisz_wynik("audio", status)
+    try:
+        to_limit, opis = _pobierz_licznika().zapisz_wynik("audio", status)
+    except Exception as exc:  # noqa: BLE001 — licznik nie moze zatrzymac wysylki
+        log.error("Kolejka: %s NIE zapisany w liczniku — %s", zadanie_id, exc,
+                  exc_info=True)
+        to_limit, opis = False, "nie zapisano w liczniku"
+    else:
         log.info("Kolejka: %s zapisany jako %s%s", zadanie_id, opis,
                  " (LIMIT)" if to_limit else "")
-        if to_limit:
-            kolejka.oznacz(zadanie_id, "limit", {"opis": opis})
-            await _powiadom_kanal(
-                dysk, kanal_id,
-                f"🚫 **NotebookLM odmówił** — {opis}. Zwykle oznacza to limit "
-                f"dzienny; następna generacja będzie możliwa po jego resetcie.")
-            return
+    if to_limit:
+        kolejka.oznacz(zadanie_id, "limit", {"opis": opis})
+        await _powiadom_kanal(
+            dysk, kanal_id,
+            f"🚫 **NotebookLM odmówił** — {opis}. Zwykle oznacza to limit "
+            f"dzienny; następna generacja będzie możliwa po jego resetcie.")
+        return
 
     strona = str(getattr(status, "status", ""))
     if strona != "completed":
@@ -530,9 +550,13 @@ async def _obsluz_zadanie_audio(dysk: Any, zadanie: dict[str, Any]) -> None:
                               f"❌ **Audio nie powstało** (status: {strona or '?'}).")
         return
 
-    kolejka.oznacz(zadanie_id, "gotowe", {"task": str(getattr(status, "task_id", ""))})
+    # NIE oznaczamy `gotowe` przed wysylaniem. Kolejka wtedy klamala: zadanie
+    # widniało jako zrobione, a plik nigdy nie poszedl — wyjatek z wysylki
+    # zostawial uzytkownika bez pliku i bez slowa.
     artifacts.wyczysc_cache()  # nowy artefakt musi byc widoczny od razu
-    await _wyślij_wynik_audio(dysk, kanal_id, zadanie, raport)
+    wysłane = await _wyślij_wynik_audio(dysk, kanal_id, zadanie, raport)
+    kolejka.oznacz(zadanie_id, "gotowe" if wysłane else "nieudane",
+                   {"task": str(getattr(status, "task_id", ""))})
 
 
 async def _powiadom_kanal(dysk: Any, kanal_id: Any, tekst: str) -> None:
@@ -572,11 +596,14 @@ async def _zapisz_plik_lokalnie(w: dict[str, Any]) -> str:
 
 
 async def _wyślij_wynik_audio(dysk: Any, kanal_id: Any, zadanie: dict[str, Any],
-                              raport: dict[str, Any]) -> None:
-    """Znajduje gotowy plik i wysyla go do kanalu, ktory o zadanie prosil."""
-    import artifacts as art
+                              raport: dict[str, Any]) -> bool:
+    """Znajduje gotowy plik i wysyla go. Zwraca False, gdy nie wyslano.
 
-    znalezione = await art.zbierz(_klient_nb, typy=["audio"])
+    Zwracanie wyniku jest tu obowiazkowe: kolejka oznacza `gotowe` tylko po
+    dostarczeniu, a `nieudane` gdy plik nie poszedl — inaczej zadanie wygladalo
+    by na zrobione, a uzytkownik nie dostal nic.
+    """
+    znalezione = await artifacts.zbierz(_klient_nb, typy=["audio"])
     kandydaci = [w for w in znalezione
                  if "blad" not in w and w.get("url")
                  and str(w.get("utworzono", "")).startswith(
@@ -586,15 +613,23 @@ async def _wyślij_wynik_audio(dysk: Any, kanal_id: Any, zadanie: dict[str, Any]
         await _powiadom_kanal(dysk, kanal_id,
                               "⚠️ Audio zgłoszone jako gotowe, ale nie znalazłem "
                               "go na liście. Spróbuj `/artefakty`.")
-        return
+        return False
 
     w = kandydaci[0]
     sekundy = raport.get("sekundy", 0.0)
     kanal = await dysk.fetch_channel(int(kanal_id))
     await kanal.send(f"🎧 Audio gotowe w {sekundy / 60:.1f} min — wysyłam plik…")
-    await _wyślij_jeden_plik(dysk, kanal, w, zadanie.get("tytul", "Audio"))
-    for rozmiar in Path(tempfile.gettempdir()).glob("ai-dan-art/*.tmp"):
-        rozmiar.unlink(missing_ok=True)
+    try:
+        wysłane = await _wyślij_jeden_plik(dysk, kanal, w, zadanie.get("tytul", "Audio"))
+    except Exception as exc:  # noqa: BLE001 — kanal moze byc niedostepny
+        log.error("Kolejka: wyslanie pliku nieudane — %s", exc, exc_info=True)
+        await _powiadom_kanal(dysk, kanal_id, f"❌ Nie udało się wysłać pliku: {exc}"[:250])
+        return False
+    finally:
+        import tempfile
+        for rozmiar in Path(tempfile.gettempdir()).glob("ai-dan-art/*.tmp"):
+            rozmiar.unlink(missing_ok=True)
+    return bool(wysłane)
 
 
 @tree.command(name="audio", description="Wygeneruj podcast z notatnika (w kolejce)")

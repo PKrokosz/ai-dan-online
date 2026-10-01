@@ -30,10 +30,7 @@ PLIKI_PROSTE = [
 # z katalogu glownego do podkatalogow
 MAPA = {
     "limits_probe.py": "tools/limits_probe.py",
-    "reauth.py": "tools/reauth.py",
-    "cookies_z_profilu.py": "tools/cookies_z_profilu.py",
-    "wgraj_sesje.py": "tools/wgraj_sesje.py",
-    "dziennie_reauth.py": "tools/dziennie_reauth.py",
+    "uruchom_testy.py": "tools/uruchom_testy.py",
     "test_uprawnienia.py": "tools/test_uprawnienia.py",
     "test_limits.py": "tests/test_limits.py",
     "test_bot.py": "tests/test_bot.py",
@@ -43,6 +40,22 @@ MAPA = {
     "test_generowanie.py": "tests/test_generowanie.py",
     "test_negatywny.py": "tests/test_negatywny.py",
     "setup_app.py": None,  # juz jest w aplikacji, nie nadpisujemy
+}
+
+# Narzedzia dzialajace TYLKO na Windows. Nie trafiaja na serwer: czytaja
+# lokalny profil Chrome i/lub same wysylaja sesje na serwer — serwer nie ma
+# czego w tym czytac. Wczesniej byly w MAPA mimo to, ze `tools/ftp_up.py`
+# ich nie wysylal, a instalator przechodzil po cichu ("juz w aplikacji"),
+# udajac ze wszystko jest na miejscu.
+#
+# Osobna grupa, bo "nie wysylamy tego" i "zapomnielismy o tym" wygladaja
+# tak samo. Bramka `tests/test_wdrozenie.py` pilnuje, zeby ta lista i
+# manifest wysylania sie zgadzaly.
+TYLKO_LOKALNIE = {
+    "reauth.py",              # odzyskanie sesji z profilu Chrome
+    "cookies_z_profilu.py",   # odczyt ciasteczek z profilu Chrome
+    "wgraj_sesje.py",         # wysyla sesje na serwer (FTP) z Windows
+    "dziennie_reauth.py",     # zadanie dzienne na Windows
 }
 # modulow NIE wolno kopiowac zglownego katalogu, bo maja wlasne podkatalogi
 # i instalacja skasowalaby im strukture
