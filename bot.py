@@ -26,10 +26,13 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 import unicodedata
+
+import generowanie  # uzywany w dekoratorach @app_commands.choices, czyli przy imporcie
 
 import discord
 from discord import app_commands, Intents
@@ -364,6 +367,16 @@ async def on_ready() -> None:
         # reconnect, a bez tego zostalaby petla na petle
         _zadanie_kontroli = asyncio.create_task(zadanie_kontroli_sesji())
         log.info("Uruchomiono zadanie kontroli sesji")
+    if _zadanie_audio is None:
+        _zadanie_audio = asyncio.create_task(zadanie_kolejki_audio())
+        log.info("Uruchomiono zadanie kolejki audio")
+    # `w_toku` po restarcie to zadanie, ktorego procesu juz nie ma. Bez
+    # sprzatania kolejka nigdy nie ruszylaby — nastepne() zwraca tylko
+    # `czekajace`, a `w_toku` zostaloby na wieki.
+    import kolejka
+    przerwane = kolejka.sprzataj_przerwane()
+    if przerwane:
+        log.info("Kolejka: oznaczono %d zadan jako przerwane po restarcie", przerwane)
     try:
         zsynchronizowane = await tree.sync()
         log.info("Zsynchronizowano %d komend: %s", len(zsynchronizowane),
@@ -374,14 +387,16 @@ async def on_ready() -> None:
 
 @client.event
 async def on_close() -> None:
-    global _zadanie_kontroli
-    if _zadanie_kontroli is not None:
-        _zadanie_kontroli.cancel()
-        try:
-            await _zadanie_kontroli
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-        _zadanie_kontroli = None
+    global _zadanie_kontroli, _zadanie_audio
+    for nazwa in ("_zadanie_kontroli", "_zadanie_audio"):
+        zadanie = globals().get(nazwa)
+        if zadanie is not None:
+            zadanie.cancel()
+            try:
+                await zadanie
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            globals()[nazwa] = None
     await _zamknij_klienta_nb()
     log.info("ai-dan zamkniety")
 
@@ -426,6 +441,217 @@ async def sprawdz_sesje(klient: Any, notebook_id: str) -> list[Any]:
 
 
 _zadanie_kontroli: Any = None
+_zadanie_audio: Any = None
+
+# Interwal odpytywania kolejki. Generowanie trwa minuty wiec pytamy
+# rzadko — kolejka jest plikiem, wiec sprawdzenie jest tanie.
+KOLEJKA_CO_S = float(os.getenv("KOLEJKA_INTERVAL", "20"))
+# Ile sekund na wygenerowanie jednego audio. Dolna granica nie jest losowa:
+# NotebookLM potrafi nie odpowiedziec w ogole, a kolejka ma byc jednoznaczna.
+KOLEJKA_LIMIT_JEDNOCZESNIE = 1
+
+
+async def zadanie_kolejki_audio(dysk: Any = None) -> None:
+    """Worker kolejki: bierze jedno zadanie, generuje, wysyla do kanalu.
+
+    W procesie bota, nie osobno — z dwoch powodow. Po pierwsze, kazde
+    wygenerowanie MUSI trafic do `limits.json`, a licznik jest licznikiem
+    procesowym w tym samym katalogu. Po drugie, `refresh.py` pokazal, ze dwa
+    procesy piszace do tego samego pliku to wyścig.
+
+    Kolejka jest jednoznaczna: jedno zadanie w toku. Dwie generacje naraz to
+    dwa limity dzienne, a tego nikt nie zamawial.
+    """
+    import kolejka
+
+    dysk = dysk if dysk is not None else client
+    log.info("Kolejka audio: start (co %.0f s)", KOLEJKA_CO_S)
+    while True:
+        try:
+            zadanie = kolejka.nastepne()
+            if zadanie is not None:
+                await _obsluz_zadanie_audio(dysk, zadanie)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — worker nie moze umrzec
+            log.error("Kolejka audio: blad w petli — %s", exc, exc_info=True)
+        await asyncio.sleep(KOLEJKA_CO_S)
+
+
+async def _obsluz_zadanie_audio(dysk: Any, zadanie: dict[str, Any]) -> None:
+    import kolejka
+
+    import generowanie
+
+    zadanie_id = zadanie["id"]
+    kanal_id = zadanie.get("channel_id")
+    parametry = zadanie.get("parametry") or {}
+    kolejka.oznacz(zadanie_id, "w_toku")
+    log.info("Kolejka: biorę %s (%s) dla kanalu %s", zadanie_id,
+             parametry.get("format", generowanie.DOMYSLNY_FORMAT), kanal_id)
+
+    async def zglos(tekst: str) -> None:
+        kanal = await dysk.fetch_channel(int(kanal_id))
+        await kanal.send(tekst)
+
+    raport = await generowanie.wygeneruj_audio(
+        _klient_nb, NOTEBOOK_ID,
+        dlugosc=parametry.get("dlugosc", generowanie.DOMYSLNA_DLUGOSC),
+        format_audio=parametry.get("format", generowanie.DOMYSLNY_FORMAT),
+        zgloszenie=zglos,
+    )
+
+    if "blad" in raport:
+        kolejka.oznacz(zadanie_id, "nieudane", {"blad": raport["blad"]})
+        log.warning("Kolejka: %s nieudane — %s", zadanie_id, raport["blad"])
+        await _powiadom_kanal(dysk, kanal_id,
+                              f"❌ **Audio nie wyszło** — {raport['blad'][:200]}")
+        return
+
+    # Licznik zapisywany PO WYNIKU, nie przy zleceniu: `zapisz_wynik` sam
+    # rozroznia sukces, limit i awarie, a limit przychodzi zwykle juz
+    # w odpowiedzi na zlecenie.
+    status = raport["status"]
+    if _licznik is not None:
+        to_limit, opis = _licznik.zapisz_wynik("audio", status)
+        log.info("Kolejka: %s zapisany jako %s%s", zadanie_id, opis,
+                 " (LIMIT)" if to_limit else "")
+        if to_limit:
+            kolejka.oznacz(zadanie_id, "limit", {"opis": opis})
+            await _powiadom_kanal(
+                dysk, kanal_id,
+                f"🚫 **NotebookLM odmówił** — {opis}. Zwykle oznacza to limit "
+                f"dzienny; następna generacja będzie możliwa po jego resetcie.")
+            return
+
+    strona = str(getattr(status, "status", ""))
+    if strona != "completed":
+        kolejka.oznacz(zadanie_id, "nieudane", {"status": strona})
+        await _powiadom_kanal(dysk, kanal_id,
+                              f"❌ **Audio nie powstało** (status: {strona or '?'}).")
+        return
+
+    kolejka.oznacz(zadanie_id, "gotowe", {"task": str(getattr(status, "task_id", ""))})
+    artifacts.wyczysc_cache()  # nowy artefakt musi byc widoczny od razu
+    await _wyślij_wynik_audio(dysk, kanal_id, zadanie, raport)
+
+
+async def _powiadom_kanal(dysk: Any, kanal_id: Any, tekst: str) -> None:
+    try:
+        kanal = await dysk.fetch_channel(int(kanal_id))
+        await kanal.send(tekst)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Nie udalo sie powiadomic kanalu %s: %s", kanal_id, exc)
+
+
+async def _wyślij_jeden_plik(dysk: Any, kanal: Any, w: dict[str, Any],
+                             tytul: str) -> bool:
+    """Sciaga plik i wysyla. Zwraca False, gdy przekracza limit."""
+    import artifacts as art
+
+    if w.get("miesci") is False:
+        await kanal.send(
+            f"⚠️ **{w['tytul']}** — {w['mb']:.2f} MB przekracza limit Discorda "
+            f"(10 MiB). Nie wysyłam, bo plik zostałby przycięty bez ostrzeżenia. "
+            f"Użyj `/pobierz`, żeby zobaczyć szczegóły, albo zamów `krotka`.")
+        return False
+    await kanal.send(content=f"**{w['tytul']}**\n{w['mb']:.2f} MB",
+                     file=discord.File(
+                         await _zapisz_plik_lokalnie(w), filename=f"{w['id'][:8]}.{art.rozszerzenie(w.get('typ', ''))}"
+                     ))
+    return True
+
+
+async def _zapisz_plik_lokalnie(w: dict[str, Any]) -> str:
+    import tempfile
+
+    katalog = Path(tempfile.gettempdir()) / "ai-dan-art"
+    katalog.mkdir(parents=True, exist_ok=True)
+    sciezka = katalog / f"{w['id'][:8]}.tmp"
+    sciezka.write_bytes(await pobierz_bajty(_klient_nb, w["url"]))
+    return str(sciezka)
+
+
+async def _wyślij_wynik_audio(dysk: Any, kanal_id: Any, zadanie: dict[str, Any],
+                              raport: dict[str, Any]) -> None:
+    """Znajduje gotowy plik i wysyla go do kanalu, ktory o zadanie prosil."""
+    import artifacts as art
+
+    znalezione = await art.zbierz(_klient_nb, typy=["audio"])
+    kandydaci = [w for w in znalezione
+                 if "blad" not in w and w.get("url")
+                 and str(w.get("utworzono", "")).startswith(
+                     time.strftime("%Y-%m-%d"))]
+    kandydaci.sort(key=lambda w: w.get("utworzono", ""), reverse=True)
+    if not kandydaci:
+        await _powiadom_kanal(dysk, kanal_id,
+                              "⚠️ Audio zgłoszone jako gotowe, ale nie znalazłem "
+                              "go na liście. Spróbuj `/artefakty`.")
+        return
+
+    w = kandydaci[0]
+    sekundy = raport.get("sekundy", 0.0)
+    kanal = await dysk.fetch_channel(int(kanal_id))
+    await kanal.send(f"🎧 Audio gotowe w {sekundy / 60:.1f} min — wysyłam plik…")
+    await _wyślij_jeden_plik(dysk, kanal, w, zadanie.get("tytul", "Audio"))
+    for rozmiar in Path(tempfile.gettempdir()).glob("ai-dan-art/*.tmp"):
+        rozmiar.unlink(missing_ok=True)
+
+
+@tree.command(name="audio", description="Wygeneruj podcast z notatnika (w kolejce)")
+@app_commands.describe(
+    dlugosc="Długość — krótka mieści się w załączniku Discorda",
+    format_audio="Format rozmowy",
+    temat="O czym ma być (opcjonalnie, np. 'zasady kolonii karnnej')",
+)
+@app_commands.choices(
+    dlugosc=[app_commands.Choice(name=n, value=k) for k, n in generowanie.opcje_dlugosci()],
+    format_audio=[app_commands.Choice(name=n, value=k) for k, n in generowanie.opcje_formatow()],
+)
+async def audio(
+    interaction: discord.Interaction,
+    dlugosc: str = generowanie.DOMYSLNA_DLUGOSC,
+    format_audio: str = generowanie.DOMYSLNY_FORMAT,
+    temat: str | None = None,
+) -> None:
+    await interaction.response.defer(thinking=True)
+    if _klient_nb is None:
+        await interaction.followup.send(_opis_przerwy()[0], ephemeral=True)
+        return
+
+    import kolejka
+
+    import generowanie as gen
+
+    if dlugosc not in gen.DLUGOSC:
+        await interaction.followup.send(
+            f"Nieznana długość `{dlugosc}`. Wybierz z listy.", ephemeral=True)
+        return
+    if format_audio not in gen.FORMAT:
+        await interaction.followup.send(
+            f"Nieznany format `{format_audio}`. Wybierz z listy.", ephemeral=True)
+        return
+
+    parametry = {"dlugosc": dlugosc, "format": format_audio}
+    if temat:
+        parametry["temat"] = temat[:200]
+    try:
+        zadanie = kolejka.dodaj("audio", channel_id=interaction.channel_id,
+                                author_id=interaction.user.id,
+                                parametry=parametry)
+    except ValueError as exc:
+        await interaction.followup.send(f"Kolejka pełna — {exc}"[:300], ephemeral=True)
+        return
+
+    za_soba = len(kolejka.aktywne())
+    await interaction.followup.send(
+        f"🎙️ Przyjęte do kolejki (#{zadanie['id']}).\n"
+        f"Wybrano: **{gen.opis_wyboru(dlugosc, format_audio)}**\n"
+        f"Aktualnie w kolejce: **{za_soba}** (jedno generowanie naraz).\n"
+        f"Gotowe dostaniesz w tym kanale. Generowanie zjada limit dzienny — "
+        f"nie generujemy, dopóki nie poprosisz.")
+    log.info("Kolejka: dodano %s (%s/%s) przez %s", zadanie["id"], dlugosc,
+             format_audio, interaction.user.id)
 
 
 async def zadanie_kontroli_sesji(dysk: Any = None) -> None:
