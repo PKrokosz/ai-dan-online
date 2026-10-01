@@ -517,8 +517,46 @@ async def artefakty(interaction: discord.Interaction) -> None:
     log.info("Wypisano %d artefaktow dla %s", len(gotowe), interaction.user.id)
 
 
+def artifacts_autocomplete(
+    func: Any,
+) -> Any:
+    """Podpowiedzi dla parametru `id` w `/pobierz`.
+
+    Osobna funkcja, bo `app_commands.autocomplete` musi byc zadeklarowane na
+    KOMENDZIE, a nie na callbacku — i `choices` z `autocomplete` wykluczaja sie
+    nawzajem, wiec nie da sie zrobic listy „na sztywno".
+
+    `mierz=False` jest tu kluczowe: autocomplete odpala sie przy kazdym
+    nacisnietym klawiszu, a pelny pomiar rozmiarow sciagalby kazdy plik
+    z Google. Uzytkownik wpisujac slowo czekalby sekundami.
+
+    Blad zwraca pusta liste, nie wywala: `except ValueError` (blad Discorda)
+    w `.autocomplete()` jest jedynym miejscem, gdzie wyjatek moze byc w
+    normalnym trybie pracy komendy.
+    """
+    async def callback(interaction: discord.Interaction, current: str) -> list:
+        import artifacts
+
+        if _klient_nb is None:
+            return []
+        try:
+            wpisy = await artifacts.zbierz(_klient_nb, mierz=False)
+            wybor = artifacts.podpowiedzi(wpisy)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Podpowiedzi nieudane: %s", exc)
+            return []
+        prefiks = (current or "").strip().lower()
+        if prefiks:
+            wybor = [w for w in wybor
+                     if prefiks in w["name"].lower() or prefiks in w["value"].lower()]
+        return [app_commands.Choice(name=w["name"][:100], value=w["value"]) for w in wybor]
+
+    return app_commands.autocomplete(id=callback)(func)
+
+
 @tree.command(name="pobierz", description="Wyślij gotowy materiał na Discorda")
-@app_commands.describe(id="Pierwsze 8 znaków id z listy /artefakty")
+@app_commands.describe(id="Materiał do wysłania — wybierz z listy albo wklep id")
+@artifacts_autocomplete
 async def pobierz(interaction: discord.Interaction, id: str) -> None:  # noqa: A002
     await interaction.response.defer(thinking=True)
     if _klient_nb is None:

@@ -47,6 +47,47 @@ ROZSZERZENIA: dict[str, str] = {
 }
 DOMYSLNE_ROZSZERZENIE = "bin"
 
+# Limity Discorda dla podpowiedzi w autocomplete: 25 wyborow, 100 znakow
+# etykiety. Tytuly bywaja dluzsze, wiec skracamy na granicy slowa.
+LIMIT_PODPOWIEDZI = 25
+LIMIT_ETYKIETY = 100
+
+
+def etykieta_autocomplete(w: dict[str, Any]) -> str:
+    """Nazwa do podpowiedzi: tytul + typ, przyciety do limitu Discorda.
+
+    Przycinamy na ostatnim spacji przed granica, zeby nie urwac slowa w
+    polowie — `Płacili za bycie więźniem w Gothi` czyta sie gorzej niz
+    `Płacili za byteen więźniem…`.
+    """
+    tytul = str(w.get("tytul", "?")).strip() or "bez tytulu"
+    typ = str(w.get("typ", "?"))
+    pelny = f"{tytul} ({typ})"
+    if len(pelny) <= LIMIT_ETYKIETY:
+        return pelny
+    # zostaw miejsce na " (typ)" — inaczej typ zostalby uciety
+    budzet = LIMIT_ETYKIETY - len(typ) - 3
+    skrocony = tytul[:max(10, budzet)]
+    if " " in skrocony:
+        skrocony = skrocony[:skrocony.rfind(" ")]
+    return f"{skrocony}… ({typ})"
+
+
+def podpowiedzi(wpisy: list[dict[str, Any]], max: int = LIMIT_PODPOWIEDZI) -> list[dict[str, str]]:
+    """Zamienia wpisy na wyborz Discorda. Bez pomiaru rozmiaru.
+
+    Bez `max` Discord obcina po cichu do 25, a uzytkownik widzi wtedy liste,
+    ktora wyglada jakby byla kompletna — a nie jest.
+    """
+    wybor: list[dict[str, str]] = []
+    for w in wpisy:
+        if "blad" in w or not w.get("url"):
+            continue
+        if len(wybor) >= max:
+            break
+        wybor.append({"name": etykieta_autocomplete(w), "value": str(w["id"])})
+    return wybor
+
 STAN = {0: "?", 1: "OCZEKUJE", 2: "W TOKU", 3: "GOTOWY",
         4: "NIEUDANE", 5: "USUNIĘTY"}
 
@@ -93,8 +134,16 @@ async def zmierz(http: Any, url: str) -> int:
     return n
 
 
-async def zbierz(klient: Any, typy: list[str] | None = None) -> list[dict[str, Any]]:
-    """Zwraca gotowe artefakty z rozmiarem. Nic nie generuje."""
+async def zbierz(klient: Any, typy: list[str] | None = None,
+                 mierz: bool = True) -> list[dict[str, Any]]:
+    """Zwraca gotowe artefakty. Nic nie generuje.
+
+    `mierz=False` pomija pomiar rozmiarow. To nie optymalizacja, tylko wymóg:
+    `/pobierz` ma autocomplete, a ten odpala sie przy kazdym nacisnietym
+    klawiszu. Przy pelnym `mierz` kazde wywolanie zadzialoby przez dziesiatki
+    sekund i sciagalby kazdy plik z serwera Google — czyli uzytkownik wpisujac
+    slowo zobaczylby, jak bot zachodzi mu w Netlife.
+    """
     import httpx
     from notebooklm._auth import cookies as auth_cookies
 
@@ -128,13 +177,14 @@ async def zbierz(klient: Any, typy: list[str] | None = None) -> list[dict[str, A
                     "utworzono": str(getattr(a, "created_at", "")),
                 }
                 if url:
-                    try:
-                        wpis["bajty"] = await zmierz(http, url)
-                        wpis["mb"] = round(wpis["bajty"] / 1048576, 2)
-                        wpis["miesci"] = wpis["bajty"] <= LIMIT_ZALACZNIKA_B
-                        wpis["url"] = url
-                    except Exception as exc:  # noqa: BLE001
-                        wpis["blad_rozmiaru"] = f"{type(exc).__name__}: {str(exc)[:70]}"
+                    wpis["url"] = url
+                    if mierz:
+                        try:
+                            wpis["bajty"] = await zmierz(http, url)
+                            wpis["mb"] = round(wpis["bajty"] / 1048576, 2)
+                            wpis["miesci"] = wpis["bajty"] <= LIMIT_ZALACZNIKA_B
+                        except Exception as exc:  # noqa: BLE001
+                            wpis["blad_rozmiaru"] = f"{type(exc).__name__}: {str(exc)[:70]}"
                 wyniki.append(wpis)
     return wyniki
 

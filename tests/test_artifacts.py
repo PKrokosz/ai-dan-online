@@ -142,5 +142,94 @@ class TestRozszerzenia(unittest.TestCase):
         self.assertIn("artifacts.rozszerzenie(", cialo)
 
 
+class TestPodpowiedzi(unittest.TestCase):
+    """Autocomplete `/pobierz` — lista wyboru zamiast wpisywania id.
+
+    Dwie granice Discora, ktore trzeba pilnowac: 25 wyborow i 100 znakow
+    etykiety. Przekroczenie nie jest bledem — Discord po prostu obcina, wiec
+    uzytkownik widzi liste wygladajaca jak kompletna, a nie jest.
+    """
+
+    @staticmethod
+    def wpis(tytul="Przewodnik po awansach w Kolonii", typ="audio", ident="abc12345-0000"):
+        return {"typ": typ, "id": ident, "tytul": tytul,
+                "utworzono": "2026-09-30", "url": "https://x/y.mp3"}
+
+    def test_etykieta_zawiera_tytul_i_typ(self):
+        etykieta = artifacts.etykieta_autocomplete(self.wpis())
+        self.assertIn("Przewodnik po awansach", etykieta)
+        self.assertIn("audio", etykieta)
+
+    def test_ciecie_zawsze_na_granicy_slowa(self):
+        # Jeden tytul to za malo: przy dlugosci dobranej tak, by znak wypadl
+        # na spacji, test przechodzil nawet na kodzie tniejacym w polowie
+        # slowa (sprawdzone 01.10). "ab ab ab ..." daje co trzeci znak jako
+        # spacje, wiec surowe cięcie trafia w slowo w wiekszosci przypadkow.
+        zlamane = 0
+        for n in range(1, 60):
+            tytul = "ab " * n + "cd ef gh"
+            etykieta = artifacts.etykieta_autocomplete(self.wpis(tytul, "audio"))
+            if "…" not in etykieta:
+                continue
+            przed = etykieta.split("…")[0]
+            pozycja = len(przed)
+            if not (pozycja >= len(tytul) or tytul[pozycja] == " "):
+                zlamane += 1
+        self.assertEqual(zlamane, 0,
+                         f"cięcie w połowie słowa w {zlamane} przypadkach")
+
+    def test_etykieta_nie_przekracza_limitu(self):
+        dlugi = "Bardzo dlugi tytul materialu " * 10
+        for typ in ("audio", "video"):
+            etykieta = artifacts.etykieta_autocomplete(self.wpis(dlugi, typ))
+            self.assertLessEqual(len(etykieta), 100, f"{typ}: za dlugie")
+
+    def test_dluga_etykieta_nie_urwa_slowa(self):
+        # musi realnie przekroczyc 100 znakow, inaczej skracanie sie nie
+        # odpali i test na niczym by nie czekal — taki test jest pozorny
+        dlugi = ("Płacili za bycie więźniem w Gothicu i jeszcze o tym opowiadali "
+                 "przez cały sezon przygód w krainie mgły")
+        etykieta = artifacts.etykieta_autocomplete(self.wpis(dlugi, "audio"))
+        self.assertGreater(len(dlugi) + len(" (audio)"), 100, "przypadek nie jest długi")
+        self.assertLessEqual(len(etykieta), 100)
+        self.assertIn("audio", etykieta, "typ nie moze zniknac przy skracaniu")
+        self.assertIn("…", etykieta)
+        # cięcie następuje na granicy słowa: znak w oryginale tuż za skrótem
+        # musi być spacją (albo skrót sięga końca tytułu), inaczej wielokrop
+        # ląduje w połowie słowa
+        przed = etykieta.split("…")[0]
+        pozycja = len(przed)
+        self.assertTrue(
+            pozycja >= len(dlugi) or dlugi[pozycja] == " ",
+            f"cięcie w połowie słowa: …{dlugi[max(0, pozycja - 5):pozycja + 5]}…"
+        )
+
+    def test_podpowiedzi_uzywaja_pelnego_id(self):
+        # wartosc musi byc jednoznaczna; prefiks byl zrodlem kolizji id
+        wybor = artifacts.podpowiedzi([self.wpis(ident="abc12345-0000")])
+        self.assertEqual(wybor[0]["value"], "abc12345-0000")
+
+    def test_podpowiedzi_omijaja_bledy_i_bez_url(self):
+        wpisy = [
+            {"typ": "audio", "blad": "TimeoutError: cos"},
+            {"typ": "audio", "id": "x1", "tytul": "Bez adresu"},
+            self.wpis(ident="x2"),
+        ]
+        wybor = artifacts.podpowiedzi(wpisy)
+        self.assertEqual([w["value"] for w in wybor], ["x2"])
+
+    def test_limit_wyborow_to_dokladnie_25(self):
+        wpisy = [self.wpis(tytul=f"Materiał {i}", ident=f"id{i}") for i in range(40)]
+        wybor = artifacts.podpowiedzi(wpisy)
+        self.assertEqual(len(wybor), 25,
+                         "Discord obcina do 25 — myslimy za uzytkownika")
+
+    def test_pusta_lista_gdy_nic_nie_ma(self):
+        self.assertEqual(artifacts.podpowiedzi([]), [])
+
+    def test_typ_bez_spacji_nie_wywala(self):
+        self.assertIn("audio", artifacts.etykieta_autocomplete(self.wpis("a", "audio")))
+
+
 if __name__ == "__main__":
     unittest.main()
