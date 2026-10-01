@@ -167,7 +167,57 @@ def wykonaj(wymuszaj: bool = False, tylko_sprawdz: bool = False) -> int:
         shutil.rmtree(katalog_tymczasowy, ignore_errors=True)
 
 
+class Dziennik:
+    """Duplikuje wyjscie do pliku — zadanie harmonogramu nie ma terminala.
+
+    Przekierowanie `2>` w `schtasks /TR` NIE dzialalo: `&` i `>` trafiaja do
+    polecenia jako zwykly tekst, python dostawal uszkodzona linie i konczyl
+    kodem 2. Skrypt loguje sam, wiec harmonogram nie musi nic przekierowywac.
+    """
+
+    def __init__(self, sciezka: Path):
+        self.sciezka = sciezka
+        self.plik = None
+
+    def __enter__(self):
+        self.sciezka.parent.mkdir(parents=True, exist_ok=True)
+        self.plik = self.sciezka.open("a", encoding="utf-8")
+        self.plik.write(f"\n=== przebieg {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        self.plik.flush()
+        # oryginal trzymamy osobno — po podmianie `sys.stdout` to ten obiekt,
+        # wiec pisanie przez `sys.stdout.write` rekurencyjnie wracaloby do nas
+        self.prawdziwy = sys.stdout
+        return self
+
+    def __exit__(self, *_):
+        # przywracamy oryginal PRZED zamknieciem — inaczej interpreter przy
+        # zamykaniu flushuje juz zamkniety plik i konczy kodem 120
+        if getattr(self, "prawdziwy", None) is not None:
+            sys.stdout = self.prawdziwy  # type: ignore[assignment]
+        if self.plik is not None:
+            self.plik.close()
+        return False
+
+    def write(self, tekst: str) -> None:
+        self.prawdziwy.write(tekst)
+        if self.plik is not None:
+            self.plik.write(tekst)
+            self.plik.flush()
+
+    def flush(self) -> None:
+        self.prawdziwy.flush()
+        if self.plik is not None:
+            self.plik.flush()
+
+
 def main() -> int:
+    dziennik = Dziennik(Path(os.environ["USERPROFILE"]) / ".notebooklm" / "reauth.log")
+    with dziennik:
+        sys.stdout = dziennik  # type: ignore[assignment]
+        return _main()
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(
         description="Reautoryzacja sesji NotebookLM z profilu Chrome (bez hasla)")
     parser.add_argument("--wymuszaj", action="store_true",
