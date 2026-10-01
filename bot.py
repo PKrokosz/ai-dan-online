@@ -57,6 +57,20 @@ CHAT_TIMEOUT = float(os.getenv("CHAT_TIMEOUT", "300"))
 # (15 min) i większy niż realny czas odpowiedzi NotebookLM.
 BUDZET_ZAPYTANIA_S = float(os.getenv("BUDZET_ZAPYTANIA_S", "240"))
 
+# Proaktywna kontrola sesji. Bez niej powiadomience wychodzilo WYLACZNIE z
+# handlera pytania — a nikt nie pytal, wiec martwa sesja siedziala godzinami
+# bez sladu. Zaobserwowane 30.09: bot "online", sesja wygasla o 22:03, a
+# wiadomo o tym bylo dopiero przy kolejnym pytaniu.
+# 0 = wylaczone (przydatne w testach, gdzie nie ma petli).
+KONTROLA_SESJI_S = float(os.getenv("KONTROLA_SESJI_S", "900"))
+# Rozbieg przed pierwszym pulsem — klient musi dojrzec. Osobna zmienna, bo
+# inaczej test czekalby 30 s na zadanie, ktore ma zglaszac blad w milisekundach.
+KONTROLA_SESJI_START_S = float(os.getenv("KONTROLA_SESJI_START_S", "30"))
+# Kanal alarmowy. OWNER_USER_ID bywa pusty, a powiadomienie do zglaszajacego
+# wymaga, zeby ktos najpierw zapytal — razem to znaczy, ze przy pustym wlascicielu
+# nikt nie dostaje nic. Kanal dziala bez zadnego pytania.
+ALERT_CHANNEL_ID = os.getenv("ALERT_CHANNEL_ID", "").strip()
+
 LIMIT_DISCORD = 2000
 MAX_PODRZEDKOW = 50          # na uzytkownika; chroni pamiec procesu
 MAX_ZRODL_CYTOWANIA = 400    # dlugosc cytatu w cytowaniu
@@ -219,17 +233,31 @@ async def powiadom_o_wygaslej_sesji(
 
     tekst = (
         "🔑 **Sesja NotebookLM wygasła** — bot nie odpowiada na pytania.\n\n"
-        "Poprawka (jednorazowa, kilka minut):\n"
-        "1. Na komputerze: `notebooklm login --browser chrome`\n"
-        "2. Wgrać `storage_state.json` na serwer:\n"
+        "Nie ma tego na serwerze: brak tam przeglądarki i profilu Google, więc "
+        "serwer potrafi tylko wykryć. Naprawa idzie z komputera:\n\n"
+        "1. `python tools/reauth.py` — wyciąga świeżą sesję z profilu Chrome "
+        "**bez hasla** i sprawdza ją, zanim podmieni\n"
+        "2. Wgrać `~/.notebooklm/sesja_na_serwer.json` na:\n"
         "   `/home/srv120794/ai-dan/nlm-home/storage_state.json`\n"
-        "3. `python3.11 /home/srv120794/ai-dan/daemon.py stop && … start`\n\n"
-        "Nie da się tego zrobić automatycznie — biblioteka nie umie zalogować się "
-        "bez przeglądarki, a `rookiepy` (import ciasteczek) wymaga Rust, którego "
-        "blokuje polityka Windows. Powiadomienie leci raz na incydent."
+        "3. `python3.11 daemon.py stop && … start`\n\n"
+        "Powiadomienie leci raz na incydent. Puls kontroli sprawdza sesję co "
+        f"{KONTROLA_SESJI_S:.0f} s, więc nie trzeba zgadywać, czy bot żyje."
     )
 
     wysłane = False
+
+    # Kanal alarmowy PRZED właścicielem: działa bez żadnego pytania i bez
+    # znajomości id użytkownika. Właściciel bywa pusty, a wtedy poprzednio
+    # powiadomienie mogło wyjść wyłącznie do osoby, która akurat zadała pytanie.
+    if ALERT_CHANNEL_ID:
+        try:
+            kanal = await bot.fetch_channel(int(ALERT_CHANNEL_ID))
+            await kanal.send(tekst)
+            log.warning("Powiadomiono kanal %s o wygaslej sesji", ALERT_CHANNEL_ID)
+            wysłane = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Nie udalo sie powiadomic kanalu %s: %s", ALERT_CHANNEL_ID, exc)
+
     for id_docelowy in [int(OWNER_USER_ID)] if OWNER_USER_ID else []:
         if id_docelowy == id_zglaszajacego:
             continue
@@ -241,7 +269,7 @@ async def powiadom_o_wygaslej_sesji(
         except Exception as exc:  # noqa: BLE001 — DM moze byc zamkniety
             log.warning("Nie udalo sie powiadomic wlasciciela %s: %s", id_docelowy, exc)
 
-    if not wysłane:
+    if not wysłane and id_zglaszajacego:
         try:
             # `fetch_user`, nie `get_user`: `get_user` czyta wylacznie cache
             # i zwraca None dla kazdego, kto nie jest w pamieci. Bot jest
@@ -303,7 +331,7 @@ async def _zamknij_klienta_nb() -> None:
 
 @client.event
 async def on_ready() -> None:
-    global _blad_polaczenia
+    global _blad_polaczenia, _zadanie_kontroli
     log.info("ai-dan online jako %s (ID=%s)", client.user, client.user.id)
     try:
         await _zbuduj_klienta_nb()
@@ -311,6 +339,11 @@ async def on_ready() -> None:
         # Bot startuje, ale nie odpowie - lepiej powiedziec to wprost
         _blad_polaczenia = exc
         log.error("NotebookLM: nie moge sie polaczyc (%s). /ai-dan bedzie zwracac blad.", exc)
+    if KONTROLA_SESJI_S > 0 and _zadanie_kontroli is None:
+        # `is None` chroni przed druga instancja: `on_ready` fires po kazdym
+        # reconnect, a bez tego zostalaby petla na petle
+        _zadanie_kontroli = asyncio.create_task(zadanie_kontroli_sesji())
+        log.info("Uruchomiono zadanie kontroli sesji")
     try:
         zsynchronizowane = await tree.sync()
         log.info("Zsynchronizowano %d komend: %s", len(zsynchronizowane),
@@ -321,6 +354,14 @@ async def on_ready() -> None:
 
 @client.event
 async def on_close() -> None:
+    global _zadanie_kontroli
+    if _zadanie_kontroli is not None:
+        _zadanie_kontroli.cancel()
+        try:
+            await _zadanie_kontroli
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        _zadanie_kontroli = None
     await _zamknij_klienta_nb()
     log.info("ai-dan zamkniety")
 
@@ -362,6 +403,45 @@ async def sprawdz_sesje(klient: Any, notebook_id: str) -> list[Any]:
     puls. Wyjatki nie lapemy — caller musi je zobaczyc.
     """
     return await klient.sources.list(notebook_id)
+
+
+_zadanie_kontroli: Any = None
+
+
+async def zadanie_kontroli_sesji(dysk: Any = None) -> None:
+    """Puls sesji w procesie bota — wykrywa wygasanie bez czekania na pytanie.
+
+    Swiadomie BEZ osobnego procesu. `refresh.py` byl drugim pisarzem
+    `storage_state.json` obok bota, a dwa procesy zapisujace ten sam plik to
+    wyścig — podejrzenie, ze to wlasnie zabijało sesje po ~1,93 h. Ten puls
+    tylko CZYTA (`sources.list`, najtańszy RPC wymagajacy tokenu) i niczego
+    nie zapisuje, wiec nie ma czego odbic.
+
+    `ask()` nie wchodzi w gre — zjada limit dzienny. Wykrywanie musi byc
+    najtańszym RPC, jaki wymaga uwierzytelnienia.
+
+    `dysk` jest jawna zależnoscia zamiast globalnego `client` — dzieki temu
+    test podmienia obiekt, a nie moduł.
+    """
+    dysk = dysk if dysk is not None else client
+    log.info("Kontrola sesji: start co %ss", KONTROLA_SESJI_S)
+    await asyncio.sleep(KONTROLA_SESJI_START_S)  # klient musi dojrzec
+    while True:
+        try:
+            if _blad_polaczenia is not None:
+                raise _blad_polaczenia
+            if _klient_nb is not None:
+                await sprawdz_sesje(_klient_nb, NOTEBOOK_ID)
+                log.debug("Kontrola sesji: sesja zyje")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if czy_blad_sesji(exc):
+                log.error("Kontrola sesji: SESJA WYGASLA — %s", exc)
+                await powiadom_o_wygaslej_sesji(dysk, [], 0)
+            else:
+                log.warning("Kontrola sesji: blad, ale nie sesja — %s", exc)
+        await asyncio.sleep(KONTROLA_SESJI_S)
 
 
 def _opis_przerwy() -> tuple[str, bool]:

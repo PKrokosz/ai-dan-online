@@ -69,8 +69,11 @@ class AtrapaKlient:
     def __init__(self, chat=None):
         self.chat = chat or AtrapaChat()
         self.sources = self
+        self.calls = []
 
     async def list(self, notebook_id):
+        # licznik pozwala odróżnić "puls zrobił odczyt" od "puls w ogóle nie żyje"
+        self.calls.append(notebook_id)
         return []
 
 
@@ -96,6 +99,7 @@ class AtrapaDiscord:
     def __init__(self):
         self.wyslane = []
         self.komunikaty = []
+        self.kanalowe = []
         self.zablokuj = set()
 
     async def fetch_user(self, ident):
@@ -105,6 +109,19 @@ class AtrapaDiscord:
     def get_user(self, ident):
         self.komunikaty.append(("get", ident))
         return AtrapaUzytkownik(int(ident), self)
+
+    async def fetch_channel(self, ident):
+        # kanal alarmowy musi dzialac takze gdy zadna osoba nie pytala
+        return AtrapaKanal(int(ident), self)
+
+
+class AtrapaKanal:
+    def __init__(self, ident, bot):
+        self.id = ident
+        self._bot = bot
+
+    async def send(self, tresc):
+        self._bot.kanalowe.append((self.id, tresc))
 
 
 class TestKontraktChat(unittest.IsolatedAsyncioTestCase):
@@ -512,9 +529,40 @@ class TestPowiadomienieSesji(unittest.IsolatedAsyncioTestCase):
         bot.OWNER_USER_ID = ""
         await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
         tresc = self.bot.wyslane[0][1]
-        self.assertIn("notebooklm login", tresc)
+        # 30.09: instrukcja mowila, ze automatyzacja jest niemozliwa. Nie
+        # jest — profil Chrome trzyma trwale zalogowana sesje, a `reauth.py`
+        # ja wyciaga bez hasla. Test pilnuje drogi, ktora dziala.
+        self.assertIn("reauth.py", tresc)
         self.assertIn("storage_state.json", tresc)
         self.assertLessEqual(len(tresc), 2000)
+
+    async def test_komunikat_nie_klamze_ze_to_niemozliwe(self):
+        bot.OWNER_USER_ID = ""
+        await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 111)
+        tresc = self.bot.wyslane[0][1].lower()
+        self.assertNotIn("nie da się tego zrobić automatycznie", tresc)
+        self.assertNotIn("nie da sie tego zrobic automatycznie", tresc)
+
+    async def test_kanal_alarmowy_dziala_bez_pytania(self):
+        # Dziura 30.09: przy pustym OWNER_USER_ID powiadomienie mogeło wyjsc
+        # tylko do osoby, ktora akurat zadała pytanie. Bez pytania nikt nie
+        # dostawal nic, mimo ze bot mogl siedziec godzinami na martwej sesji.
+        bot.OWNER_USER_ID = ""
+        bot.ALERT_CHANNEL_ID = "777"
+        try:
+            ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 0)
+            self.assertTrue(ok)
+            # id_zglaszajacego == 0 oznacza "nikt nie pytal"
+            self.assertEqual(len(self.bot.kanalowe), 1)
+            self.assertEqual(self.bot.kanalowe[0][0], 777)
+        finally:
+            bot.ALERT_CHANNEL_ID = ""
+
+    async def test_pusty_wlasciciel_i_brak_pytania_nie_wywraca(self):
+        bot.OWNER_USER_ID = ""
+        bot.ALERT_CHANNEL_ID = ""
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 0)
+        self.assertFalse(ok)
 
     async def test_awaria_wysylki_nie_wywraca_bota(self):
         bot.OWNER_USER_ID = "222"
@@ -554,6 +602,81 @@ class TestStart(unittest.TestCase):
     def test_bracket_z_inicjalizuje_konfiguracje(self):
         self.assertIsNotNone(bot.LIMIT_DISCORD)
         self.assertGreater(bot.MAX_PODRZEDKOW, 0)
+
+
+class TestPulsSesji(unittest.IsolatedAsyncioTestCase):
+    """Proaktywna kontrola: wykrywa wygasanie BEZ czekania na pytanie.
+
+    30.09 powiadomienie wychodzilo wylacznie z handlera pytania, a nikt nie
+    pytal — bot siedzial godzinami "online" na martwej sesji bez sladu.
+    """
+
+    def setUp(self):
+        from notebooklm import AuthError
+        self.AuthError = AuthError
+        self.bot = AtrapaDiscord()
+        self.stare = (bot._powiadomiono_o_sesji, bot.KONTROLA_SESJI_S,
+                      bot.KONTROLA_SESJI_START_S, bot.ALERT_CHANNEL_ID,
+                      bot._blad_polaczenia, bot._klient_nb)
+        bot._powiadomiono_o_sesji = False
+        bot.KONTROLA_SESJI_S = 0.05
+        bot.KONTROLA_SESJI_START_S = 0.0
+        bot.ALERT_CHANNEL_ID = "777"
+        bot._blad_polaczenia = None
+        bot._klient_nb = None
+
+    def tearDown(self):
+        (bot._powiadomiono_o_sesji, bot.KONTROLA_SESJI_S,
+         bot.KONTROLA_SESJI_START_S, bot.ALERT_CHANNEL_ID,
+         bot._blad_polaczenia, bot._klient_nb) = self.stare
+
+    def test_puls_nie_zjada_limitu(self):
+        # `ask()` zjada dzienny limit. Wykrywanie musi byc najtańszym RPC,
+        # wiec w zadaniu nie ma prawa wystapic zapytanie ani chat.ask.
+        zrodlo = Path(bot.__file__).read_text(encoding="utf-8")
+        start = zrodlo.index("async def zadanie_kontroli_sesji")
+        koniec = zrodlo.index("def _opis_przerwy", start)
+        cialo = zrodlo[start:koniec]
+        self.assertNotIn("zapytaj_notebook", cialo)
+        self.assertNotIn("chat.ask", cialo)
+        self.assertIn("sprawdz_sesje", cialo)
+
+    def test_puls_nie_jest_druga_instancja(self):
+        zrodlo = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn("and _zadanie_kontroli is None", zrodlo,
+                      "on_ready fires po reconnect — bez tego zadanie mnozy sie")
+
+    async def test_puls_wykrywa_wygasanie_bez_pytania(self):
+        bot._blad_polaczenia = RuntimeError("Authentication expired or invalid")
+        zadanie = asyncio.create_task(bot.zadanie_kontroli_sesji(self.bot))
+        await asyncio.sleep(0.3)
+        zadanie.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await zadanie
+        self.assertEqual(len(self.bot.kanalowe), 1,
+                         "nikt nie pytal, a powiadomienie i tak musi wyjsc")
+
+    async def test_puls_nie_spamuje_przy_czystej_sesji(self):
+        zadanie = asyncio.create_task(bot.zadanie_kontroli_sesji(self.bot))
+        await asyncio.sleep(0.3)
+        zadanie.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await zadanie
+        self.assertEqual(self.bot.kanalowe, [],
+                         "zdrowa sesja nie moze generowac powiadomien")
+
+    async def test_puls_przy_czystej_sesji_uzywa_tylko_odczytu(self):
+        klient = AtrapaKlient()
+        bot._klient_nb = klient
+        bot._blad_polaczenia = None
+        zadanie = asyncio.create_task(bot.zadanie_kontroli_sesji(self.bot))
+        await asyncio.sleep(0.3)
+        zadanie.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await zadanie
+        self.assertTrue(klient.sources.calls, "puls musi faktycznie odpytywac")
+        self.assertFalse(klient.chat.calls,
+                         "puls nie moze uzywac ask() — to zjada limit")
 
 
 if __name__ == "__main__":
