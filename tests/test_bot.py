@@ -10,12 +10,17 @@ Uruchomienie: python tests/test_bot.py
 """
 
 import asyncio
+import inspect
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # bot.py lezy o katalog wyzej — bez tego importujemy test, nie bota
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+
+import kolejka  # noqa: E402
 
 import bot
 
@@ -727,6 +732,60 @@ class TestPulsSesji(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(klient.sources.calls, "puls musi faktycznie odpytywac")
         self.assertFalse(klient.chat.calls,
                          "puls nie moze uzywac ask() — to zjada limit")
+
+
+class TestStartZadan(unittest.IsolatedAsyncioTestCase):
+    """`on_ready` musi deklarowac zmienne zadani jako GLOBALNE.
+
+    Bez `global` Python traktuje je jako lokalne i `on_ready` pada
+    UnboundLocalError — a 180 testow nie zlaplo tego, bo zadania startuja
+    dopiero przy polaczeniu z Discordem, czyli na serwerze, nie w testach.
+    """
+
+    def setUp(self):
+        bot._blad_polaczenia = None
+        bot._zadanie_kontroli = None
+        bot._zadanie_audio = None
+        bot.KONTROLA_SESJI_S = 0  # nie chcemy realnej petli w tescie
+
+    def tearDown(self):
+        for zadanie in (bot._zadanie_kontroli, bot._zadanie_audio):
+            if zadanie is not None:
+                zadanie.cancel()
+        bot._zadanie_kontroli = bot._zadanie_audio = None
+        bot.KONTROLA_SESJI_S = 900.0
+
+    def test_on_ready_deklaruje_globalne(self):
+        # czytamy kod, nie uruchamiamy: `on_ready` wymaga polaczonego klienta
+        import inspect
+        zrodlo = inspect.getsource(bot.on_ready)
+        linia_global = next(l for l in zrodlo.splitlines() if l.strip().startswith("global "))
+        for nazwa in ("_blad_polaczenia", "_zadanie_kontroli", "_zadanie_audio"):
+            self.assertIn(nazwa, linia_global,
+                          f"{nazwa} bez `global` to UnboundLocalError na serwerze")
+
+    def test_on_close_anuluje_oba_zadania(self):
+        import inspect
+        zrodlo = inspect.getsource(bot.on_close)
+        linia_global = next(l for l in zrodlo.splitlines() if l.strip().startswith("global "))
+        for nazwa in ("_zadanie_kontroli", "_zadanie_audio"):
+            self.assertIn(nazwa, linia_global)
+        self.assertIn("cancel()", zrodlo)
+
+    async def test_kolejka_sie_zatrzymuje_gdy_wyjatkiem(self):
+        # worker nie moze umrzec — inaczej kolejka stoi na wieki czekajac.
+        # `kolejka.nastepne()` jest SYNCHRONICZNE, wiec atrapa tez — async
+        # dawalo koroutine, a worker dalby na niej "TypeError: not
+        # subscriptable" i test sprawdzalby inny blad niz zamierzony.
+        def zly_nastepne():
+            raise RuntimeError("uszkodzony plik kolejki")
+        with patch.object(kolejka, "nastepne", zly_nastepne):
+            zadanie = asyncio.create_task(bot.zadanie_kolejki_audio(dysk=None))
+            await asyncio.sleep(0.1)
+            self.assertFalse(zadanie.done(), "worker musi przetrwac wyjatek")
+            zadanie.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await zadanie
 
 
 if __name__ == "__main__":

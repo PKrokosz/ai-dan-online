@@ -25,7 +25,7 @@ PLIKI_PROSTE = [
     # dodane 30.09 — modulow nie bylo w manifeście, wiec `install_files.py`
     # zostawial w aplikacji ich poprzednie wersje (brak rozszerzen w
     # artifacts.py, brak refresh.py po restarcie hosta)
-    "artifacts.py", "kolejka.py", "refresh.py",
+    "artifacts.py", "kolejka.py", "refresh.py", "generowanie.py",
 ]
 # z katalogu glownego do podkatalogow
 MAPA = {
@@ -40,6 +40,7 @@ MAPA = {
     "test_artifacts.py": "tests/test_artifacts.py",
     "test_kolejka.py": "tests/test_kolejka.py",
     "test_reauth.py": "tests/test_reauth.py",
+    "test_generowanie.py": "tests/test_generowanie.py",
     "test_negatywny.py": "tests/test_negatywny.py",
     "setup_app.py": None,  # juz jest w aplikacji, nie nadpisujemy
 }

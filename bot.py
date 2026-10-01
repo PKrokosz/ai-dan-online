@@ -354,7 +354,7 @@ async def _zamknij_klienta_nb() -> None:
 
 @client.event
 async def on_ready() -> None:
-    global _blad_polaczenia, _zadanie_kontroli
+    global _blad_polaczenia, _zadanie_kontroli, _zadanie_audio
     log.info("ai-dan online jako %s (ID=%s)", client.user, client.user.id)
     try:
         await _zbuduj_klienta_nb()
@@ -388,15 +388,14 @@ async def on_ready() -> None:
 @client.event
 async def on_close() -> None:
     global _zadanie_kontroli, _zadanie_audio
-    for nazwa in ("_zadanie_kontroli", "_zadanie_audio"):
-        zadanie = globals().get(nazwa)
+    for zadanie in (_zadanie_kontroli, _zadanie_audio):
         if zadanie is not None:
             zadanie.cancel()
             try:
                 await zadanie
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-            globals()[nazwa] = None
+    _zadanie_kontroli = _zadanie_audio = None
     await _zamknij_klienta_nb()
     log.info("ai-dan zamkniety")
 
