@@ -916,6 +916,109 @@ def _atrapa_licznika():
     return lambda: L()
 
 
+class TestAlarmPoRestarcie(unittest.IsolatedAsyncioTestCase):
+    """Alarm o wygaslej sesji musi dzialac takze wtedy, gdy bot wlasnie
+    wstanie — a restart to czesto dokladnie ten moment, w ktorym sesja
+    jest martwa (wdrozenie, awaria restartowa).
+
+    01.10, 09:39: puls wykryl wygasla sesje 30 s po restarcie i NIKT sie
+    o tym nie dowiedzial. `ALERT_CHANNEL_ID` pusty, `_ostatni_kanal` = None
+    (pamiec procesu zresetowana restartem), wlasciciela nie ma — i zero
+    logu, zero powiadomienia.
+    """
+
+    def setUp(self):
+        self.plik = bot.PLIK_OSTATNIEGO_KANALU
+        self.stary = self.plik.read_bytes() if self.plik.exists() else None
+
+    def tearDown(self):
+        if self.stary is None:
+            self.plik.unlink(missing_ok=True)
+        else:
+            self.plik.write_bytes(self.stary)
+        bot._ostatni_kanal = None
+
+    def test_kanal_przezywa_restart(self):
+        with patch.object(bot, "PLIK_OSTATNIEGO_KANALU", self.plik):
+            bot._zapisz_ostatni_kanal(4242)
+            self.assertEqual(bot._wczytaj_ostatni_kanal(), 4242,
+                             "kanal zapisany wczesniej nie wraca po restarcie")
+
+    def test_zly_plik_to_brak_kanalu_a_nie_wyjątek(self):
+        with patch.object(bot, "PLIK_OSTATNIEGO_KANALU", self.plik):
+            self.plik.write_text("to nie jest json", encoding="utf-8")
+            self.assertIsNone(bot._wczytaj_ostatni_kanal())
+            self.plik.write_text('{"kanal": "nie int"}', encoding="utf-8")
+            self.assertIsNone(bot._wczytaj_ostatni_kanal())
+            self.plik.write_text("[]", encoding="utf-8")
+            self.assertIsNone(bot._wczytaj_ostatni_kanal())
+
+    def test_nie_ma_pliku_pozostawia_smieci(self):
+        with patch.object(bot, "PLIK_OSTATNIEGO_KANALU", self.plik):
+            self.plik.unlink(missing_ok=True)
+            self.assertIsNone(bot._wczytaj_ostatni_kanal())
+            bot._zapisz_ostatni_kanal(7)
+            self.assertEqual(bot._wczytaj_ostatni_kanal(), 7)
+            for smiec in self.plik.parent.glob("ostatni_kanal.json.tmp"):
+                self.fail(f"zostal plik tymczasowy: {smiec}")
+
+    async def test_wykrycie_bez_kanalu_jest_glośne(self):
+        """Brak powiadomienia musi zostac w logu na ERROR.
+
+        W poprzedniej wersji taki przebieg konczyl sie kompletna cisza —
+        wykryto awarie i nie powiedziano nikomu, nawet w dzienniku.
+        """
+        class Dysk:
+            async def fetch_channel(self, _i):
+                raise RuntimeError("brak dostepu")
+
+            async def fetch_user(self, _i):
+                raise RuntimeError("brak dostepu")
+
+        zapisane = []
+
+        class Rejestruj:
+            def error(self, komunikat, *args):
+                zapisane.append(komunikat % args if args else komunikat)
+
+            def warning(self, *_a, **_k):
+                pass
+
+        with patch.object(bot, "ALERT_CHANNEL_ID", ""), \
+             patch.object(bot, "OWNER_USER_ID", ""), \
+             patch.object(bot, "_ostatni_kanal", None), \
+             patch.object(bot, "_powiadomiono_o_sesji", False), \
+             patch.object(bot.log, "error", Rejestruj().error), \
+             patch.object(bot.log, "warning", Rejestruj().warning):
+            wyslane = await bot.powiadom_o_wygaslej_sesji(Dysk(), [], 0)
+
+        self.assertFalse(wyslane, "nic nie poszlo")
+        self.assertTrue(zapisane, "wykryto awarie bez powiadomienia i bez logu")
+        self.assertTrue(any("NIKT nie zostal powiadomiony" in w for w in zapisane),
+                        f"log nie mowi wprost, ze nikt nie zostal powiadomiony: {zapisane}")
+
+    async def test_kanal_z_pliku_jest_uzywany_przy_alarmie(self):
+        class Kanal:
+            async def send(self, tresc):
+                self.tresc = tresc
+
+        wyslane = []
+
+        class Dysk:
+            async def fetch_channel(self, ident):
+                k = Kanal()
+                wyslane.append(ident)
+                return k
+
+        with patch.object(bot, "ALERT_CHANNEL_ID", ""), \
+             patch.object(bot, "OWNER_USER_ID", ""), \
+             patch.object(bot, "_powiadomiono_o_sesji", False), \
+             patch.object(bot, "_ostatni_kanal", 999):
+            ok = await bot.powiadom_o_wygaslej_sesji(Dysk(), [], 0)
+        self.assertTrue(ok)
+        self.assertEqual(wyslane, [999])
+
+
 if __name__ == "__main__":
     wynik = unittest.main(verbosity=2, exit=False).result
     print("\nKONTRAKT:", "OK" if wynik.wasSuccessful() else "PADL")

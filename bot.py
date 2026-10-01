@@ -22,6 +22,7 @@ Kontrakt pilnuje `test_bot.py` (bramka bez sieci i bez logowania).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -217,6 +218,28 @@ _powiadomiono_o_sesji = False
 # wlasnie konfiguracja byla warunkiem, ktorego nikt nie ustawil, przez co puls
 # wykryl wygasanie i zostala cisza. Kanal zapisywany przy kazdej odpowiedzi.
 _ostatni_kanal: int | None = None
+PLIK_OSTATNIEGO_KANALU = Path(__file__).resolve().parent / "ostatni_kanal.json"
+
+
+def _wczytaj_ostatni_kanal() -> int | None:
+    """Ostatni kanal z pliku. Zly plik to brak alarmu, wiec cicho i bez wyjatku."""
+    try:
+        surowe = json.loads(PLIK_OSTATNIEGO_KANALU.read_text(encoding="utf-8"))
+        ident = surowe.get("kanal")
+        return ident if isinstance(ident, int) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _zapisz_ostatni_kanal(ident: int) -> None:
+    """Zapis atomowy — przerwanie w trakcie nie moze zostawic pliku bez
+    wartosci, bo wtedy kolejny start bota zglosilby brak kanalow."""
+    chwilowy = PLIK_OSTATNIEGO_KANALU.with_suffix(".json.tmp")
+    try:
+        chwilowy.write_text(json.dumps({"kanal": ident}), encoding="utf-8")
+        chwilowy.replace(PLIK_OSTATNIEGO_KANALU)
+    except OSError as exc:
+        log.warning("Nie zapisalem ostatniego kanalu %s: %s", ident, exc)
 
 
 def zapamietaj_kanal(interaction: Any) -> None:
@@ -225,6 +248,14 @@ def zapamietaj_kanal(interaction: Any) -> None:
     ident = getattr(kanal, "id", None)
     if isinstance(ident, int):
         _ostatni_kanal = ident
+        _zapisz_ostatni_kanal(ident)
+
+
+# Wczytanie przy imporcie, nie w `on_ready`: `on_ready` moze sie nie wywolac
+# przy bledzie polaczenia, a wtedy kanal jest najbardziej potrzebny.
+# Pamiec procesu gubila ten kanal po kazdym restarcie, czyli dokladnie
+# wtedy, gdy alarm o wygaslej sesji jest najbardziej potrzebny.
+_ostatni_kanal = _wczytaj_ostatni_kanal()
 
 
 def czy_blad_sesji(exc: BaseException) -> bool:
@@ -307,6 +338,20 @@ async def powiadom_o_wygaslej_sesji(
             wysłane = True
         except Exception as exc:  # noqa: BLE001
             log.error("Nie udalo sie powiadomic uzytkownika %s: %s", id_zglaszajacego, exc)
+
+    if not wysłane:
+        # Wykryto wygasla sesje i NIKT sie o tym nie dowiedzial. 01.10, 09:39:
+        # taki przebieg konczyl sie bez jednego logu, bo `ALERT_CHANNEL_ID`
+        # pusty, `_ostatni_kanal` = None po restarcie, wlasciciela nie ma.
+        # Cisza przy wykrytej awarii jest gorsza niz zly komunikat — czlowiek
+        # widzi wtedy, ze cos jest nie tak, zamiast czekac na pytanie, ktore
+        # nie dostanie odpowiedzi.
+        log.error(
+            "Wykryl wygasla sesje, ale NIKT nie zostal powiadomiony "
+            "(ALERT_CHANNEL_ID=%s, ostatni kanal=%s, OWNER_USER_ID=%s). "
+            "Ustaw ALERT_CHANNEL_ID w .env — inaczej alarm zgaśnie po restarcie.",
+            ALERT_CHANNEL_ID or "pusty", _ostatni_kanal or "brak",
+            OWNER_USER_ID or "pusty")
 
     return wysłane
 

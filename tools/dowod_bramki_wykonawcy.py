@@ -42,6 +42,14 @@ przypadki = [
      'test_temat_jest_przekazywany_do_instructions',
      '        instructions=temat or None,\n',
      ''),
+    ('alarm gubi kanal po restarcie',
+     'test_kanal_przezywa_restart',
+     '        return ident if isinstance(ident, int) else None\n',
+     '        return None\n'),
+    ('wykrycie bez powiadomienia milczy',
+     'test_wykrycie_bez_kanalu_jest_glosne',
+     '"Wykryl wygasla sesje, ale NIKT nie zostal powiadomiony "',
+     '"x "'),
 ]
 
 bledy = []

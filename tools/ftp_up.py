@@ -16,6 +16,7 @@ PLIKI = [
     ("limits.py", "limits.py"),
     ("tools/limits_probe.py", "limits_probe.py"),
     ("tools/uruchom_testy.py", "uruchom_testy.py"),
+    ("tools/nadrob_zapis.py", "nadrob_zapis.py"),
     ("tools/test_uprawnienia.py", "test_uprawnienia.py"),
     ("tests/test_bot.py", "test_bot.py"),
     ("tests/test_artifacts.py", "test_artifacts.py"),

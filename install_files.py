@@ -31,6 +31,7 @@ PLIKI_PROSTE = [
 MAPA = {
     "limits_probe.py": "tools/limits_probe.py",
     "uruchom_testy.py": "tools/uruchom_testy.py",
+    "nadrob_zapis.py": "tools/nadrob_zapis.py",
     "test_uprawnienia.py": "tools/test_uprawnienia.py",
     "test_limits.py": "tests/test_limits.py",
     "test_bot.py": "tests/test_bot.py",
