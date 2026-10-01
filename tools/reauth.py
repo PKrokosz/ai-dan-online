@@ -199,7 +199,15 @@ class Dziennik:
         return False
 
     def write(self, tekst: str) -> None:
-        self.prawdziwy.write(tekst)
+        # Konsola w Windows to cp1250 i nie umie zakodowac m.in. U+FFFD, ktory
+        # wchodzi w komunikaty Playwrighta. Bez zabezpieczenia `write` rzucal
+        # UnicodeEncodeError DOKLADNIE tam, gdzie wypisywany byl wlasciwy blad,
+        # czyli diagnostyka gubila diagnoze i zostawialo "nie udalo sie: ?".
+        #
+        # Rozwiazanie jest w `main()`: tam konsola dostaje UTF-8 z `replace`.
+        # Tutaj tylko nie przycinamy danych, bo plik dziennika jest UTF-8.
+        if self.prawdziwy is not None:
+            self.prawdziwy.write(tekst)
         if self.plik is not None:
             self.plik.write(tekst)
             self.plik.flush()
@@ -211,6 +219,16 @@ class Dziennik:
 
 
 def main() -> int:
+    # Konsola Windows to cp1250. Komunikaty Playwrighta zawieraja U+FFFD,
+    # ktorego cp1250 nie zakoduje, i `print` wywalal sie w miejscu, gdzie
+    # wypisywany byl wlasciwy blad — zostawiajac "nie udalo sie: ?" zamiast
+    # przyczyny. `replace` zamienia tylko to, czego nie da sie zakodowac;
+    # polskie znaki przechodza bez zmian.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass  # stary interpreter albo przekierowany strumien — plik i tak UTF-8
+
     dziennik = Dziennik(ciasteczka_mod.katalog_bazowy() / ".notebooklm" / "reauth.log")
     with dziennik:
         sys.stdout = dziennik  # type: ignore[assignment]
