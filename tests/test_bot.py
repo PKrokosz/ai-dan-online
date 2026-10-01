@@ -604,6 +604,56 @@ class TestStart(unittest.TestCase):
         self.assertGreater(bot.MAX_PODRZEDKOW, 0)
 
 
+    async def test_ostatni_kanal_zastepuje_konfiguracje(self):
+        # 30.09: ALERT_CHANNEL_ID byl pusty i nikt go nie ustawil, wiec puls
+        # wykryl wygasanie i nie mial gdzie napisac. Ostatni kanal, w ktorym
+        # ktos uzywal bota, zamyka te dziure bez zadnej konfiguracji.
+        bot.OWNER_USER_ID = ""
+        bot.ALERT_CHANNEL_ID = ""
+        bot._ostatni_kanal = 4242
+        try:
+            ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 0)
+            self.assertTrue(ok)
+            self.assertEqual(self.bot.kanalowe[0][0], 4242)
+        finally:
+            bot._ostatni_kanal = None
+
+    async def test_brak_kanalu_i_wlasciciela_nie_wywraca(self):
+        bot.OWNER_USER_ID = ""
+        bot.ALERT_CHANNEL_ID = ""
+        bot._ostatni_kanal = None
+        ok = await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 0)
+        self.assertFalse(ok)
+        self.assertEqual(self.bot.kanalowe, [])
+
+    async def test_konfiguracja_ma_priorytet_nad_ostatnim_kanalem(self):
+        bot.ALERT_CHANNEL_ID = "777"
+        bot._ostatni_kanal = 4242
+        try:
+            await bot.powiadom_o_wygaslej_sesji(self.bot, self.bledy, 0)
+            id_kanaly = [k for k, _ in self.bot.kanalowe]
+            self.assertIn(777, id_kanaly)
+            self.assertNotIn(4242, id_kanaly,
+                             "jak konfiguracja dziala, ostatni kanal nie dostaje")
+        finally:
+            bot.ALERT_CHANNEL_ID = ""
+            bot._ostatni_kanal = None
+
+    async def test_kanal_zapamietany_z_interakcji(self):
+        class Interakcja:
+            class channel:  # noqa: N801 — atrybut jak w discord.py
+                id = 5150
+        bot.zapamietaj_kanal(Interakcja())
+        self.assertEqual(bot._ostatni_kanal, 5150)
+        bot._ostatni_kanal = None
+
+    async def test_interakcja_bez_id_kanalu_nie_wywraca(self):
+        class Pusta:
+            channel = None
+        bot.zapamietaj_kanal(Pusta())
+        self.assertIsNone(bot._ostatni_kanal)
+
+
 class TestPulsSesji(unittest.IsolatedAsyncioTestCase):
     """Proaktywna kontrola: wykrywa wygasanie BEZ czekania na pytanie.
 

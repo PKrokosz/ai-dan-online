@@ -30,11 +30,14 @@ PLIKI_PROSTE = [
 # z katalogu glownego do podkatalogow
 MAPA = {
     "limits_probe.py": "tools/limits_probe.py",
+    "reauth.py": "tools/reauth.py",
+    "cookies_z_profilu.py": "tools/cookies_z_profilu.py",
     "test_uprawnienia.py": "tools/test_uprawnienia.py",
     "test_limits.py": "tests/test_limits.py",
     "test_bot.py": "tests/test_bot.py",
     "test_artifacts.py": "tests/test_artifacts.py",
     "test_kolejka.py": "tests/test_kolejka.py",
+    "test_reauth.py": "tests/test_reauth.py",
     "test_negatywny.py": "tests/test_negatywny.py",
     "setup_app.py": None,  # juz jest w aplikacji, nie nadpisujemy
 }

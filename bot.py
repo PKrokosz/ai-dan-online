@@ -208,6 +208,20 @@ SYGNAŁY_WYGASŁEJ_SESJI = (
 # każdym pytaniu. Zadna pętla, żadne zadanie w tle — koszt to jeden bit.
 _powiadomiono_o_sesji = False
 
+# Ostatni kanal, w ktorym ktos uzywal bota. Dzieki temu powiadomienie o
+# wygaslej sesji ma gdzie trafic BEZ konfiguracji `ALERT_CHANNEL_ID` — a to
+# wlasnie konfiguracja byla warunkiem, ktorego nikt nie ustawil, przez co puls
+# wykryl wygasanie i zostala cisza. Kanal zapisywany przy kazdej odpowiedzi.
+_ostatni_kanal: int | None = None
+
+
+def zapamietaj_kanal(interaction: Any) -> None:
+    global _ostatni_kanal
+    kanal = getattr(interaction, "channel", None)
+    ident = getattr(kanal, "id", None)
+    if isinstance(ident, int):
+        _ostatni_kanal = ident
+
 
 def czy_blad_sesji(exc: BaseException) -> bool:
     """True, gdy błąd oznacza wygasłą sesję Google (nie np. limit zapytań)."""
@@ -249,14 +263,20 @@ async def powiadom_o_wygaslej_sesji(
     # Kanal alarmowy PRZED właścicielem: działa bez żadnego pytania i bez
     # znajomości id użytkownika. Właściciel bywa pusty, a wtedy poprzednio
     # powiadomienie mogło wyjść wyłącznie do osoby, która akurat zadała pytanie.
-    if ALERT_CHANNEL_ID:
+    #
+    # Kolejność kanałów: `ALERT_CHANNEL_ID` z konfiguracji, a jak pusty — ostatni
+    # kanał, w którym ktoś używał bota. Bez tego drugiego alarm zależałby od
+    # kogoś, kto wpisze numer w `.env`, a nikt tego nie zrobił i puls miał
+    # wykryć wygasanie bez miejsca, w które można je wysłać.
+    for id_kanalu in ([int(ALERT_CHANNEL_ID)] if ALERT_CHANNEL_ID else []) + (
+            [_ostatni_kanal] if _ostatni_kanal else []):
         try:
-            kanal = await bot.fetch_channel(int(ALERT_CHANNEL_ID))
+            kanal = await bot.fetch_channel(id_kanalu)
             await kanal.send(tekst)
-            log.warning("Powiadomiono kanal %s o wygaslej sesji", ALERT_CHANNEL_ID)
+            log.warning("Powiadomiono kanal %s o wygaslej sesji", id_kanalu)
             wysłane = True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Nie udalo sie powiadomic kanalu %s: %s", ALERT_CHANNEL_ID, exc)
+        except Exception as exc:  # noqa: BLE001 — kanal moze byc niedostepny
+            log.warning("Nie udalo sie powiadomic kanalu %s: %s", id_kanalu, exc)
 
     for id_docelowy in [int(OWNER_USER_ID)] if OWNER_USER_ID else []:
         if id_docelowy == id_zglaszajacego:
@@ -741,6 +761,8 @@ async def _zakoncz_interakcje(
         if len(rozmowy) >= MAX_PODRZEDKOW and uid not in rozmowy:
             rozmowy.pop(next(iter(rozmowy)))
         rozmowy[uid] = nowy_cid
+
+    zapamietaj_kanal(interaction)
 
     if not odpowiedz.strip():
         await interaction.followup.send(
